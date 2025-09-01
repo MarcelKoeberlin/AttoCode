@@ -12,7 +12,7 @@ class Settings:
     BINNING = (1, 400)
     SPECTRA_SHAPE = (1, 1340)
     REFRESH_TIME_S = 0.01
-    ENERGY_FILE = r"C:\Users\Moritz\Desktop\Pixis_data\Spec.txt"
+    ENERGY_FILE = r"Spec.txt"
 
 
 # MAIN FUNCTION ################################################################
