@@ -10,7 +10,7 @@ import matplotlib.ticker as mticker
 from matplotlib.animation import FuncAnimation
 from pylablib.devices import PrincetonInstruments
 from collections import deque
-from matplotlib.widgets import Button
+from matplotlib.widgets import Button, TextBox
 import os
 from matplotlib.ticker import PercentFormatter
 
@@ -36,8 +36,8 @@ def main():
         print(f"Energy axis length ({energy_eV.shape[0]}) does not match spectrum length ({Settings.SPECTRA_SHAPE[1]})")
         return
 
-    # --- Find indices for the Standard Deviation ROI (20-75 eV) ---
-    roi_indices = np.where((energy_eV >= 20) & (energy_eV <= 75))[0]
+    # --- Set default Standard Deviation ROI to full range ---
+    roi_indices = np.arange(energy_eV.shape[0])
     
     # --- Data buffer for the std dev calculation ---
     # Buffer for the last 2 seconds of full spectra for calculation
@@ -147,6 +147,47 @@ def main():
     keep_button = Button(button_ax, "Keep", color='lightgray', hovercolor='lightgreen')
     keep_button.on_clicked(on_keep_clicked)
     
+    # --- Add text boxes for Std Dev ROI control ---
+    def on_roi_submit(text):
+        nonlocal roi_indices
+        try:
+            min_val = float(text_box_min.text)
+            max_val = float(text_box_max.text)
+        except ValueError:
+            print("Invalid ROI input. Please enter numbers.")
+            return
+
+        if min_val >= max_val:
+            print("Min ROI must be less than Max ROI.")
+            return
+
+        roi_indices = np.where((energy_eV >= min_val) & (energy_eV <= max_val))[0]
+        print(f"Std Dev ROI set to {min_val:.1f}-{max_val:.1f} eV.")
+
+    def on_std_full_clicked(event):
+        nonlocal roi_indices
+        roi_indices = np.arange(energy_eV.shape[0])
+        # Update text boxes to reflect the full range
+        text_box_min.set_val(f"{energy_eV[0]:.1f}")
+        text_box_max.set_val(f"{energy_eV[-1]:.1f}")
+        print("Std Dev ROI set to full spectrum.")
+
+    # Create text boxes for min and max ROI
+    ax_roi_min = fig.add_axes([0.10, 0.92, 0.05, 0.06])
+    text_box_min = TextBox(ax_roi_min, 'Min (eV)', initial=f"{xmin:.1f}")
+    text_box_min.on_submit(on_roi_submit)
+
+    ax_roi_max = fig.add_axes([0.16, 0.92, 0.05, 0.06])
+    text_box_max = TextBox(ax_roi_max, 'Max (eV)', initial=f"{xmax:.1f}")
+    text_box_max.on_submit(on_roi_submit)
+    
+    # Manually trigger the first ROI calculation with initial values
+    on_roi_submit(None)
+
+    std_full_ax = fig.add_axes([0.22, 0.92, 0.1, 0.06])
+    std_full_button = Button(std_full_ax, "Std Dev (Full)", color='lightgray', hovercolor='lightblue')
+    std_full_button.on_clicked(on_std_full_clicked)
+
     #plt.tight_layout(rect=[0, 0, 1, 0.92])
 
     # --- Animation Core ---
