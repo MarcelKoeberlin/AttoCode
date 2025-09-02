@@ -12,7 +12,8 @@ class Settings:
     BINNING = (1, 400)
     SPECTRA_SHAPE = (1, 1340)
     REFRESH_TIME_S = 0.01
-    ENERGY_FILE = r"Spec.txt"
+    import os
+    ENERGY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Spec.txt")
 
 
 # MAIN FUNCTION ################################################################
