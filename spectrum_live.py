@@ -5,6 +5,8 @@ import matplotlib
 matplotlib.use('QtAgg') 
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec # Import GridSpec for advanced layouts
+# --- CHANGE: Import ticker for formatting the new gauge's labels ---
+import matplotlib.ticker as mticker
 from matplotlib.animation import FuncAnimation
 from pylablib.devices import PrincetonInstruments
 from collections import deque
@@ -36,15 +38,13 @@ def main():
     # --- Find indices for the Standard Deviation ROI (20-75 eV) ---
     roi_indices = np.where((energy_eV >= 20) & (energy_eV <= 75))[0]
     
-    # --- Data buffers for the new plot ---
+    # --- Data buffer for the std dev calculation ---
     # Buffer for the last 2 seconds of total counts for calculation
     counts_buffer_2s = deque() 
-    # Buffer for the last 20 seconds of std dev values for plotting
-    std_dev_plot_buffer_20s = deque()
 
     print("Connected devices:")
     print(PrincetonInstruments.list_cameras())
-
+    print('Please standby... MarcelCorp.TM Code loading')
     cam = PrincetonInstruments.PicamCamera('2105050003')
     print("Camera connected.")
 
@@ -63,12 +63,13 @@ def main():
 
     # --- Setup matplotlib figure and layout using GridSpec ---
     fig = plt.figure(figsize=(12, 8))
-    gs = GridSpec(2, 2, figure=fig, height_ratios=[1, 4])
+    gs = GridSpec(2, 2, figure=fig, height_ratios=[1, 4], width_ratios=[10, 1])
 
-    ax_spec = fig.add_subplot(gs[1, :])      # Bottom plot, spanning both columns
-    ax_top_left = fig.add_subplot(gs[0, 0])   # Top-left plot
-    ax_max_trace = fig.add_subplot(gs[0, 1])  # Top-right plot
-    
+    ax_spec = fig.add_subplot(gs[1, 0])      # Bottom plot, spanning both columns
+    ax_std = fig.add_subplot(gs[:, 1])   # Top-left plot
+    ax_max_trace = fig.add_subplot(gs[0, 0])  # Top-right plot
+    ax_std.yaxis.tick_right()
+    ax_std.yaxis.set_label_position("right")
     # --- Plot Artists ---
     y = np.zeros_like(energy_eV)
     line, = ax_spec.plot(energy_eV, y, zorder=2, color='#0072BD')
@@ -78,8 +79,11 @@ def main():
     max_vals_buffer = deque([0] * 200, maxlen=200)
     max_line, = ax_max_trace.plot(list(max_vals_buffer), color='#A2142F')
     
-    # Artist for the new standard deviation plot
-    std_dev_line, = ax_top_left.plot([], [], color='#EDB120')
+    # --- CHANGE: Artist for the new "water fill" gauge ---
+    # Create a bar container, then get the single bar patch from it.
+    bar_container = ax_std.bar(0, 0, color='#0077BE', width=1.0)
+    std_dev_bar_patch = bar_container[0]
+
 
     # --- Plot Styling ---
     # Bottom Spectrum Plot
@@ -101,14 +105,16 @@ def main():
     ax_max_trace.grid(True, linestyle='--', linewidth=0.5, alpha=0.7)
     ax_max_trace.set_ylim(0, 65535)
 
-    # Top-Left Standard Deviation Plot
-    ax_top_left.set_title("Std Dev of Counts in ROI (2s window)", fontsize=9)
-    ax_top_left.set_xlabel("Time ago (s)", fontsize=8)
-    ax_top_left.set_ylabel("Std Dev", fontsize=8)
-    ax_top_left.tick_params(labelsize=8)
-    ax_top_left.grid(True, linestyle='--', linewidth=0.5, alpha=0.7)
-    ax_top_left.set_xlim(20, 0) # Inverted axis to show 'time ago'
-    ax_top_left.xaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%d'))
+    # --- CHANGE: Styling for the new "water fill" gauge ---
+    ax_std.set_title("Live Std Dev (2s window)", fontsize=9)
+    # Set a fixed vertical scale from 0 to 100,000
+    ax_std.set_ylim(0, 100000)
+    # The x-axis is not meaningful, so hide it
+    ax_std.set_xticks([])
+    ax_std.set_xlim(-0.5, 0.5)
+    # Format y-axis labels to be more readable (e.g., 50k)
+    ax_std.yaxis.set_major_formatter(mticker.EngFormatter())
+    ax_std.tick_params(labelsize=8)
     
     # --- Interaction Handlers ---
     def on_key(event):
@@ -124,7 +130,6 @@ def main():
         ax_spec.set_ylim(0, max(1000, new_max))
         fig.canvas.draw()
         fig.canvas.flush_events()
-        print(f"Updated ylim_max: {ax_spec.get_ylim()[1]:.0f}")
         ani.event_source.start()
 
     fig.canvas.mpl_connect('key_press_event', on_key)
@@ -148,12 +153,12 @@ def main():
         current_time = time.time()
         data = cam.read_newest_image()
         if data is None:
-            return line, max_line, ref_line, std_dev_line
+            return line, max_line, ref_line, std_dev_bar_patch
 
         spectrum = data.ravel().astype(np.uint16)
         if spectrum.shape[0] != energy_eV.shape[0]:
             print(f"Unexpected spectrum shape: {spectrum.shape}")
-            return line, max_line, ref_line, std_dev_line
+            return line, max_line, ref_line, std_dev_bar_patch
 
         # Update main spectrum plot
         line.set_ydata(spectrum)
@@ -165,7 +170,7 @@ def main():
         max_line.set_xdata(np.arange(len(max_vals_buffer)))
         ax_max_trace.set_ylim(0, max(max(max_vals_buffer) * 1.1, 1000))
         
-        # --- NEW: Update Standard Deviation Plot ---
+        # --- CHANGE: Update Standard Deviation GAUGE ---
         # 1. Calculate total counts in the defined ROI
         total_counts_in_roi = np.sum(spectrum[roi_indices])
         
@@ -179,31 +184,19 @@ def main():
         if len(counts_buffer_2s) >= 2:
             counts_values = [item[1] for item in counts_buffer_2s]
             std_dev = np.std(counts_values)
-            
-        # 4. Add to 20-second plotting buffer and prune old data
-        std_dev_plot_buffer_20s.append((current_time, std_dev))
-        while std_dev_plot_buffer_20s and (current_time - std_dev_plot_buffer_20s[0][0] > 20):
-            std_dev_plot_buffer_20s.popleft()
 
-        # 5. Update the plot with the last 20s of data
-        if len(std_dev_plot_buffer_20s) >= 2:
-            time_vals, std_vals = zip(*std_dev_plot_buffer_20s)
-            # Plot against 'time ago'
-            relative_time_ago = np.array(time_vals) - current_time
-            
-            std_dev_line.set_data(relative_time_ago, std_vals)
-            ax_top_left.set_ylim(0, max(1, np.max(std_vals) * 1.2)) # Avoid ylim of 0
-            ax_top_left.set_xlim(-20, 0)
-            #print(np.max(std_vals))
+        # 4. Update the height of the bar patch
+        std_dev_bar_patch.set_height(std_dev)
 
         # Return a tuple of all artists that were modified
-        return line, max_line, ref_line, std_dev_line
+        return line, max_line, ref_line, std_dev_bar_patch
 
     ani = FuncAnimation(fig, update, interval=1, blit=True, cache_frame_data=False)
     plt.show()
 
     # --- Cleanup ---
     print("Plot window closed. Disconnecting camera...")
+    print("Thank you for choosing code from MarcelCorp. TM!")
     if cam.acquisition_in_progress():
         cam.stop_acquisition()
     cam.clear_acquisition()
