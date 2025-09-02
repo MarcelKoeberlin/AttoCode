@@ -12,7 +12,7 @@ import os
 
 # SETTINGS #####################################################################
 class Settings:
-    EXP_TIME_MS = 10
+    EXP_TIME_MS = 20 #This one actually does not matter in this script :D
     BINNING = (1, 400)
     SPECTRA_SHAPE = (1, 1340)
     ENERGY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Spec.txt")
@@ -57,25 +57,28 @@ def main():
 
     # --- Plot Artists ---
     y = np.zeros_like(energy_eV)
-    line, = ax.plot(energy_eV, y, zorder=2)
-    ref_line, = ax.plot(energy_eV, np.zeros_like(y), color='green', linestyle='--', linewidth=1.5, label="Kept", zorder=1)
+    line, = ax.plot(energy_eV, y, zorder=2, color='#0072BD')
+    ref_line, = ax.plot(energy_eV, np.zeros_like(y), color='#D95319', linestyle='--', linewidth=1, label="Kept", zorder=1)
     ref_line.set_visible(False)
 
     max_vals_buffer = deque([0] * 200, maxlen=200)
     ax2 = fig.add_axes([0.69, 0.7, 0.3, 0.25])
-    max_line, = ax2.plot(list(max_vals_buffer), color='red')
+    max_line, = ax2.plot(list(max_vals_buffer), color='#A2142F')
     
     # --- Plot Styling ---
     ax.set_title("Use up/down arrows to change limits", loc='left')
     ax.set_xlabel("Energy (eV)")
     ax.set_ylabel("Counts")
     ax.grid(True)
-    ax.set_ylim(0, 60000)
+    ax.set_ylim(0, np.max(cam.read_newest_image().ravel().astype(np.uint16)) * 2)
+    ax.set_xlim(20, 75)
+
     ax2.set_title("Max Trace", fontsize=9)
     ax2.set_ylabel("Max", fontsize=8)
     ax2.set_xticks([])
+    ax2.set_yticks([])
     ax2.grid(True, linestyle='--', linewidth=0.5, alpha=0.7)
-    ax2.tick_params(labelsize=8)
+    #ax2.tick_params(labelsize=8)
     ax2.set_ylim(0, 65535)
 
     # --- Interaction Handlers ---
