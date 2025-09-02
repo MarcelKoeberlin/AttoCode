@@ -4,6 +4,7 @@ import matplotlib
 # We can still suggest a good backend, though FuncAnimation is more robust
 matplotlib.use('QtAgg') 
 import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec # Import GridSpec for advanced layouts
 from matplotlib.animation import FuncAnimation
 from pylablib.devices import PrincetonInstruments
 from collections import deque
@@ -32,6 +33,15 @@ def main():
         print(f"Energy axis length ({energy_eV.shape[0]}) does not match spectrum length ({Settings.SPECTRA_SHAPE[1]})")
         return
 
+    # --- Find indices for the Standard Deviation ROI (20-75 eV) ---
+    roi_indices = np.where((energy_eV >= 20) & (energy_eV <= 75))[0]
+    
+    # --- Data buffers for the new plot ---
+    # Buffer for the last 2 seconds of total counts for calculation
+    counts_buffer_2s = deque() 
+    # Buffer for the last 20 seconds of std dev values for plotting
+    std_dev_plot_buffer_20s = deque()
+
     print("Connected devices:")
     print(PrincetonInstruments.list_cameras())
 
@@ -51,71 +61,75 @@ def main():
     cam.start_acquisition()
     print("Starting live display... (Close the plot window to stop)")
 
-    # Setup matplotlib
-    fig, ax = plt.subplots()
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    # --- Setup matplotlib figure and layout using GridSpec ---
+    fig = plt.figure(figsize=(12, 8))
+    gs = GridSpec(2, 2, figure=fig, height_ratios=[1, 4])
 
+    ax_spec = fig.add_subplot(gs[1, :])      # Bottom plot, spanning both columns
+    ax_top_left = fig.add_subplot(gs[0, 0])   # Top-left plot
+    ax_max_trace = fig.add_subplot(gs[0, 1])  # Top-right plot
+    
     # --- Plot Artists ---
     y = np.zeros_like(energy_eV)
-    line, = ax.plot(energy_eV, y, zorder=2, color='#0072BD')
-    ref_line, = ax.plot(energy_eV, np.zeros_like(y), color='#D95319', linestyle='--', linewidth=1, label="Kept", zorder=1)
+    line, = ax_spec.plot(energy_eV, y, zorder=2, color='#0072BD')
+    ref_line, = ax_spec.plot(energy_eV, np.zeros_like(y), color='#D95319', linestyle='--', linewidth=1, label="Kept", zorder=1)
     ref_line.set_visible(False)
 
     max_vals_buffer = deque([0] * 200, maxlen=200)
-    ax2 = fig.add_axes([0.69, 0.7, 0.3, 0.25])
-    max_line, = ax2.plot(list(max_vals_buffer), color='#A2142F')
+    max_line, = ax_max_trace.plot(list(max_vals_buffer), color='#A2142F')
     
+    # Artist for the new standard deviation plot
+    std_dev_line, = ax_top_left.plot([], [], color='#EDB120')
+
     # --- Plot Styling ---
-    ax.set_title("Use up/down arrows to change limits", loc='left')
-    ax.set_xlabel("Energy (eV)")
-    ax.set_ylabel("Counts")
-    ax.grid(True)
-    ax.set_ylim(0, np.max(cam.read_newest_image().ravel().astype(np.uint16)) * 2)
-    ax.set_xlim(20, 75)
+    # Bottom Spectrum Plot
+    ax_spec.set_title("Use up/down arrows to change limits", loc='left')
+    ax_spec.set_xlabel("Energy (eV)")
+    ax_spec.set_ylabel("Counts")
+    ax_spec.grid(True)
+    ax_spec.set_ylim(0, np.max(cam.read_newest_image().ravel().astype(np.uint16)) * 2)
+    xmin = 20
+    xmax = 75
+    ax_spec.set_xlim(xmin, xmax)
+    ax_spec.hlines(y=65535, xmin=xmin, xmax=xmax, colors='#7E2F8E', linestyles='--', linewidth=1)
 
-    ax2.set_title("Max Trace", fontsize=9)
-    ax2.set_ylabel("Max", fontsize=8)
-    ax2.set_xticks([])
-    ax2.set_yticks([])
-    ax2.grid(True, linestyle='--', linewidth=0.5, alpha=0.7)
-    #ax2.tick_params(labelsize=8)
-    ax2.set_ylim(0, 65535)
+    # Top-Right Max Trace Plot
+    ax_max_trace.set_title("Max Trace", fontsize=9)
+    ax_max_trace.set_ylabel("Max", fontsize=8)
+    ax_max_trace.set_xticks([])
+    ax_max_trace.tick_params(axis='y', labelsize=8)
+    ax_max_trace.grid(True, linestyle='--', linewidth=0.5, alpha=0.7)
+    ax_max_trace.set_ylim(0, 65535)
 
+    # Top-Left Standard Deviation Plot
+    ax_top_left.set_title("Std Dev of Counts in ROI (2s window)", fontsize=9)
+    ax_top_left.set_xlabel("Time ago (s)", fontsize=8)
+    ax_top_left.set_ylabel("Std Dev", fontsize=8)
+    ax_top_left.tick_params(labelsize=8)
+    ax_top_left.grid(True, linestyle='--', linewidth=0.5, alpha=0.7)
+    ax_top_left.set_xlim(20, 0) # Inverted axis to show 'time ago'
+    ax_top_left.xaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%d'))
+    
     # --- Interaction Handlers ---
-# In your main() function, replace the on_key function with this one:
     def on_key(event):
-            nonlocal ani
-            if ani is None:
-                return
-
-            # --- Stop the animation ---
-            ani.event_source.stop()
-
-            current_ylim = ax.get_ylim()
-            if event.key == 'up':
-                new_max = current_ylim[1] * 1.2
-            elif event.key == 'down':
-                new_max = current_ylim[1] / 1.2
-            else:
-                # If not a key we care about, resume immediately
-                ani.event_source.start()
-                return
-            
-            ax.set_ylim(0, max(1000, new_max))
-            
-            # --- Manually perform a full redraw NOW ---
-            fig.canvas.draw()
-            fig.canvas.flush_events()
-            
-            print(f"Updated ylim_max: {ax.get_ylim()[1]:.0f}")
-
-            # --- Resume the fast animation ---
+        nonlocal ani
+        if ani is None: return
+        ani.event_source.stop()
+        current_ylim = ax_spec.get_ylim()
+        if event.key == 'up': new_max = current_ylim[1] * 1.2
+        elif event.key == 'down': new_max = current_ylim[1] / 1.2
+        else:
             ani.event_source.start()
+            return
+        ax_spec.set_ylim(0, max(1000, new_max))
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+        print(f"Updated ylim_max: {ax_spec.get_ylim()[1]:.0f}")
+        ani.event_source.start()
 
     fig.canvas.mpl_connect('key_press_event', on_key)
 
     def on_keep_clicked(event):
-        # Read the latest data from the camera to 'freeze' it
         data = cam.read_newest_image()
         if data is not None:
             spectrum = data.ravel().astype(np.uint16)
@@ -123,46 +137,72 @@ def main():
             ref_line.set_visible(True)
             print("Spectrum kept.")
 
-    button_ax = fig.add_axes([0.01, 0.9, 0.08, 0.06])
+    button_ax = fig.add_axes([0.01, 0.92, 0.08, 0.06])
     keep_button = Button(button_ax, "Keep", color='lightgray', hovercolor='lightgreen')
     keep_button.on_clicked(on_keep_clicked)
-    fig.canvas.mpl_connect('key_press_event', on_key)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
 
     # --- Animation Core ---
     def update(frame):
+        current_time = time.time()
         data = cam.read_newest_image()
         if data is None:
-            # If no new data, return the artists unchanged
-            return line, max_line, ref_line
+            return line, max_line, ref_line, std_dev_line
 
         spectrum = data.ravel().astype(np.uint16)
         if spectrum.shape[0] != energy_eV.shape[0]:
             print(f"Unexpected spectrum shape: {spectrum.shape}")
-            return line, max_line, ref_line
+            return line, max_line, ref_line, std_dev_line
 
-        # Update plot data
+        # Update main spectrum plot
         line.set_ydata(spectrum)
         
-        # Update max trace
+        # Update max trace plot
         current_max = np.max(spectrum)
         max_vals_buffer.append(current_max)
         max_line.set_ydata(list(max_vals_buffer))
         max_line.set_xdata(np.arange(len(max_vals_buffer)))
-        ax2.set_ylim(0, max(max(max_vals_buffer) * 1.1, 1000))
+        ax_max_trace.set_ylim(0, max(max(max_vals_buffer) * 1.1, 1000))
         
+        # --- NEW: Update Standard Deviation Plot ---
+        # 1. Calculate total counts in the defined ROI
+        total_counts_in_roi = np.sum(spectrum[roi_indices])
+        
+        # 2. Add to 2-second buffer and prune old data
+        counts_buffer_2s.append((current_time, total_counts_in_roi))
+        while counts_buffer_2s and (current_time - counts_buffer_2s[0][0] > 2):
+            counts_buffer_2s.popleft()
+            
+        # 3. Calculate std dev if buffer is sufficient
+        std_dev = 0.0
+        if len(counts_buffer_2s) >= 2:
+            counts_values = [item[1] for item in counts_buffer_2s]
+            std_dev = np.std(counts_values)
+            
+        # 4. Add to 20-second plotting buffer and prune old data
+        std_dev_plot_buffer_20s.append((current_time, std_dev))
+        while std_dev_plot_buffer_20s and (current_time - std_dev_plot_buffer_20s[0][0] > 20):
+            std_dev_plot_buffer_20s.popleft()
+
+        # 5. Update the plot with the last 20s of data
+        if len(std_dev_plot_buffer_20s) >= 2:
+            time_vals, std_vals = zip(*std_dev_plot_buffer_20s)
+            # Plot against 'time ago'
+            relative_time_ago = np.array(time_vals) - current_time
+            
+            std_dev_line.set_data(relative_time_ago, std_vals)
+            ax_top_left.set_ylim(0, max(1, np.max(std_vals) * 1.2)) # Avoid ylim of 0
+            ax_top_left.set_xlim(-20, 0)
+            #print(np.max(std_vals))
+
         # Return a tuple of all artists that were modified
-        return line, max_line, ref_line
+        return line, max_line, ref_line, std_dev_line
 
-    # Create the animation object. 
-    # interval=1 tries to run as fast as possible. The camera read time will be the real limit.
-    # blit=True enables the high-speed updates.
     ani = FuncAnimation(fig, update, interval=1, blit=True, cache_frame_data=False)
-
-    # Show the plot and start the animation. This is a blocking call.
     plt.show()
 
     # --- Cleanup ---
-    # This code will only run after you close the matplotlib window
     print("Plot window closed. Disconnecting camera...")
     if cam.acquisition_in_progress():
         cam.stop_acquisition()
