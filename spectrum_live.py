@@ -12,10 +12,11 @@ from pylablib.devices import PrincetonInstruments
 from collections import deque
 from matplotlib.widgets import Button
 import os
+from matplotlib.ticker import PercentFormatter
 
 # SETTINGS #####################################################################
 class Settings:
-    EXP_TIME_MS = 20 #This one actually does not matter in this script :D
+    EXP_TIME_MS = 1 #This one actually does not matter in this script :D
     BINNING = (1, 400)
     SPECTRA_SHAPE = (1, 1340)
     ENERGY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Spec.txt")
@@ -39,12 +40,12 @@ def main():
     roi_indices = np.where((energy_eV >= 20) & (energy_eV <= 75))[0]
     
     # --- Data buffer for the std dev calculation ---
-    # Buffer for the last 2 seconds of total counts for calculation
-    counts_buffer_2s = deque() 
+    # Buffer for the last 2 seconds of full spectra for calculation
+    spectrum_buffer_2s = deque() 
 
     print("Connected devices:")
     print(PrincetonInstruments.list_cameras())
-    print('Please standby... MarcelCorp.TM Code loading')
+    #print('Please standby... Code from MarcelCorp.TM loading')
     cam = PrincetonInstruments.PicamCamera('2105050003')
     print("Camera connected.")
 
@@ -63,8 +64,9 @@ def main():
 
     # --- Setup matplotlib figure and layout using GridSpec ---
     fig = plt.figure(figsize=(12, 8))
-    gs = GridSpec(2, 2, figure=fig, height_ratios=[1, 4], width_ratios=[10, 1])
+    gs = GridSpec(2, 2, figure=fig, height_ratios=[1, 4], width_ratios=[14, 1])
 
+    # --- Create subplots ---
     ax_spec = fig.add_subplot(gs[1, 0])      # Bottom plot, spanning both columns
     ax_std = fig.add_subplot(gs[:, 1])   # Top-left plot
     ax_max_trace = fig.add_subplot(gs[0, 0])  # Top-right plot
@@ -81,9 +83,8 @@ def main():
     
     # --- CHANGE: Artist for the new "water fill" gauge ---
     # Create a bar container, then get the single bar patch from it.
-    bar_container = ax_std.bar(0, 0, color='#0077BE', width=1.0)
+    bar_container = ax_std.bar(0, 0, color='#33A02C', width=1.0)
     std_dev_bar_patch = bar_container[0]
-
 
     # --- Plot Styling ---
     # Bottom Spectrum Plot
@@ -106,14 +107,14 @@ def main():
     ax_max_trace.set_ylim(0, 65535)
 
     # --- CHANGE: Styling for the new "water fill" gauge ---
-    ax_std.set_title("Live Std Dev (2s window)", fontsize=9)
-    # Set a fixed vertical scale from 0 to 100,000
-    ax_std.set_ylim(0, 100000)
+    ax_std.set_title("Avg. Norm. Std (2s window)", fontsize=9)
+    # Set a fixed vertical scale from 0 to 1
+    ax_std.set_ylim(0, 5) # in percent
     # The x-axis is not meaningful, so hide it
     ax_std.set_xticks([])
     ax_std.set_xlim(-0.5, 0.5)
     # Format y-axis labels to be more readable (e.g., 50k)
-    ax_std.yaxis.set_major_formatter(mticker.EngFormatter())
+    ax_std.yaxis.set_major_formatter(mticker.PercentFormatter())
     ax_std.tick_params(labelsize=8)
     
     # --- Interaction Handlers ---
@@ -146,7 +147,7 @@ def main():
     keep_button = Button(button_ax, "Keep", color='lightgray', hovercolor='lightgreen')
     keep_button.on_clicked(on_keep_clicked)
     
-    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    #plt.tight_layout(rect=[0, 0, 1, 0.92])
 
     # --- Animation Core ---
     def update(frame):
@@ -171,22 +172,32 @@ def main():
         ax_max_trace.set_ylim(0, max(max(max_vals_buffer) * 1.1, 1000))
         
         # --- CHANGE: Update Standard Deviation GAUGE ---
-        # 1. Calculate total counts in the defined ROI
-        total_counts_in_roi = np.sum(spectrum[roi_indices])
-        
-        # 2. Add to 2-second buffer and prune old data
-        counts_buffer_2s.append((current_time, total_counts_in_roi))
-        while counts_buffer_2s and (current_time - counts_buffer_2s[0][0] > 2):
-            counts_buffer_2s.popleft()
+        # 1. Add full spectrum to 2-second buffer and prune old data
+        spectrum_buffer_2s.append((current_time, spectrum))
+        while spectrum_buffer_2s and (current_time - spectrum_buffer_2s[0][0] > 2):
+            spectrum_buffer_2s.popleft()
             
-        # 3. Calculate std dev if buffer is sufficient
-        std_dev = 0.0
-        if len(counts_buffer_2s) >= 2:
-            counts_values = [item[1] for item in counts_buffer_2s]
-            std_dev = np.std(counts_values)
-
-        # 4. Update the height of the bar patch
-        std_dev_bar_patch.set_height(std_dev)
+        # 2. Calculate normalized std dev if buffer is sufficient
+        avg_norm_std = 0.0
+        if len(spectrum_buffer_2s) >= 2:
+            # Create a 2D array of spectra over time
+            spectra_over_time = np.array([item[1] for item in spectrum_buffer_2s])
+            
+            # Calculate std and mean for each energy bin (column-wise)
+            std_per_energy = np.std(spectra_over_time, axis=0)
+            mean_per_energy = np.mean(spectra_over_time, axis=0)
+            
+            # Calculate normalized std, avoiding division by zero
+            normalized_std = np.divide(std_per_energy, mean_per_energy, 
+                                      out=np.zeros_like(std_per_energy), 
+                                      where=mean_per_energy!=0)
+            
+            # Average the normalized std over the ROI
+            if roi_indices.size > 0:
+                avg_norm_std = np.mean(normalized_std[roi_indices])
+        avg_norm_std = avg_norm_std * 100 #Change units to percent
+        # 3. Update the height of the bar patch
+        std_dev_bar_patch.set_height(avg_norm_std)
 
         # Return a tuple of all artists that were modified
         return line, max_line, ref_line, std_dev_bar_patch
@@ -196,13 +207,12 @@ def main():
 
     # --- Cleanup ---
     print("Plot window closed. Disconnecting camera...")
-    print("Thank you for choosing code from MarcelCorp. TM!")
+    #print("Thank you for choosing code from MarcelCorp. TM!")
     if cam.acquisition_in_progress():
         cam.stop_acquisition()
     cam.clear_acquisition()
     cam.close()
     print("Camera disconnected.")
-
 
 # RUN SCRIPT ##################################################################
 if __name__ == "__main__":
