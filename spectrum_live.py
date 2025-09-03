@@ -16,7 +16,7 @@ from matplotlib.ticker import PercentFormatter
 
 # SETTINGS #####################################################################
 class Settings:
-    EXP_TIME_MS = 1 #This one actually does not matter in this script :D
+    EXP_TIME_MS = 1  # This one actually does not matter in this script :D
     BINNING = (1, 400)
     SPECTRA_SHAPE = (1, 1340)
     ENERGY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Spec.txt")
@@ -144,7 +144,7 @@ def main():
             print("Spectrum kept.")
 
     button_ax = fig.add_axes([0.01, 0.92, 0.08, 0.06])
-    keep_button = Button(button_ax, "Keep", color='lightgray', hovercolor='lightgreen')
+    keep_button = Button(button_ax, "Keep", color='lightgreen', hovercolor='green')
     keep_button.on_clicked(on_keep_clicked)
     
     # --- Add text boxes for Std Dev ROI control ---
@@ -173,19 +173,20 @@ def main():
         print("Std Dev ROI set to full spectrum.")
 
     # Create text boxes for min and max ROI
-    ax_roi_min = fig.add_axes([0.10, 0.92, 0.05, 0.06])
-    text_box_min = TextBox(ax_roi_min, 'Min (eV)', initial=f"{xmin:.1f}")
+    ax_roi_min = fig.add_axes([0.10, 0.92, 0.1, 0.06]) #xpos ypos width height
+    text_box_min = TextBox(ax_roi_min, 'Min (eV)', initial=f"{xmin:.0f}", textalignment="right")
+    text_box_min.label.set_horizontalalignment('left')
     text_box_min.on_submit(on_roi_submit)
 
-    ax_roi_max = fig.add_axes([0.16, 0.92, 0.05, 0.06])
-    text_box_max = TextBox(ax_roi_max, 'Max (eV)', initial=f"{xmax:.1f}")
+    ax_roi_max = fig.add_axes([0.21, 0.92, 0.1, 0.06])
+    text_box_max = TextBox(ax_roi_max, 'Max (eV)', initial=f"{xmax:.0f}", textalignment="right")
+    text_box_max.label.set_horizontalalignment('left')
     text_box_max.on_submit(on_roi_submit)
-    
     # Manually trigger the first ROI calculation with initial values
     on_roi_submit(None)
 
-    std_full_ax = fig.add_axes([0.22, 0.92, 0.1, 0.06])
-    std_full_button = Button(std_full_ax, "Std Dev (Full)", color='lightgray', hovercolor='lightblue')
+    std_full_ax = fig.add_axes([0.32, 0.92, 0.1, 0.06])
+    std_full_button = Button(std_full_ax, "Std Dev (Full)", color='yellow', hovercolor='orange')
     std_full_button.on_clicked(on_std_full_clicked)
 
     #plt.tight_layout(rect=[0, 0, 1, 0.92])
