@@ -241,7 +241,8 @@ def main():
         spectrum_buffer_2s.append((current_time, spectrum))
         while spectrum_buffer_2s and (current_time - spectrum_buffer_2s[0][0] > 2):
             spectrum_buffer_2s.popleft()
-            
+        #print(rf"Sensor Temperature Set Point: {cam.get_attribute_value('Sensor Temperature Set Point')} K")
+        #print(rf"Sensor Temperature Reading: {cam.get_attribute_value('Sensor Temperature Reading')} K")  
         # 2. Calculate the average normalized standard deviation.
         avg_norm_std_percent = 0.0
         if len(spectrum_buffer_2s) >= 2: # Need at least two points to calculate std dev.
