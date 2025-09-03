@@ -7,14 +7,51 @@ from pynput import keyboard
 from pylablib.devices import PrincetonInstruments
 import gc
 
-
 # Global stop flag
 stop_loop = False
 
 # PATHS ########################################################################
 class Paths:
-    SPECTRA_FOLDER = r"C:\Users\Moritz\Desktop\Pixis_data\01_XUV_Spectra"
+    BASE_DIR = r"C:\Users\Moritz\Desktop\TESTDATA"
 
+
+# DIRECTORY AND FILE MANAGEMENT ###############################################
+def create_data_directory_and_paths():
+    """
+    Creates the directory structure: base_dir/YYYY/STRA/YYMMDD/YYMMDD_XXX/
+    Returns the directory path and base filename (without extension).
+    Automatically increments XXX if directory already exists.
+    """
+    now = datetime.now()
+    year = now.strftime("%Y")
+    date_str = now.strftime("%y%m%d")
+    
+    # Create the base directory structure
+    year_dir = os.path.join(Paths.BASE_DIR, year)
+    stra_dir = os.path.join(year_dir, "STRA")
+    date_dir = os.path.join(stra_dir, date_str)
+    
+    # Create directories if they don't exist
+    os.makedirs(date_dir, exist_ok=True)
+    
+    # Find the next available sequence number
+    sequence_num = 1
+    while True:
+        sequence_str = f"{date_str}_{sequence_num:03d}"
+        final_dir = os.path.join(date_dir, sequence_str)
+        
+        if not os.path.exists(final_dir):
+            os.makedirs(final_dir, exist_ok=True)
+            break
+        
+        sequence_num += 1
+        
+        # Safety check to prevent infinite loop
+        if sequence_num > 999:
+            raise ValueError("Too many acquisitions for this date (>999)")
+    
+    base_filename = sequence_str
+    return final_dir, base_filename
 
 # SETTINGS #####################################################################
 class Settings:
@@ -33,6 +70,11 @@ def main():
     # Start the keyboard listener
     listener = keyboard.Listener(on_press=on_press)
     listener.start()
+
+    # Create directory structure and get file paths
+    data_dir, base_filename = create_data_directory_and_paths()
+    print(f"Data directory: {data_dir}")
+    print(f"Base filename: {base_filename}")
 
     timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     print(f"Timestamp: {timestamp}")
@@ -90,7 +132,7 @@ def main():
         ("spectrum", np.uint16, Settings.SPECTRA_SHAPE[1]),
         ("timestamp_us", np.uint64)
     ])
-    mmap_path = os.path.join(Paths.SPECTRA_FOLDER, f"{timestamp}_XUV_spectra_combined.npy")
+    mmap_path = os.path.join(data_dir, f"{base_filename}.npy")
     mmap = np.memmap(mmap_path, dtype=dtype, mode="w+", shape=(Settings.NUMBER_OF_IMAGES,))
     mmap[:] = 0
     mmap.flush()
@@ -112,8 +154,7 @@ def main():
         "camera_attributes_at_start": [list(item) for item in all_attrs_at_start.items()],
         "camera_attributes_measurement": [list(item) for item in all_attrs_measurement.items()]
     }
-    metadata_path = os.path.join(Paths.SPECTRA_FOLDER, f"{timestamp}_XUV_"
-                                                       f"metadata.json")
+    metadata_path = os.path.join(data_dir, f"{base_filename}.json")
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=4)
 
@@ -158,7 +199,7 @@ def main():
             if stop_loop:
                 print("User interrupted acquisition with 'Esc'.")
                 break
-
+            
             i += 1
 
     finally:
