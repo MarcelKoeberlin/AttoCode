@@ -171,8 +171,6 @@ def load_xuv_spectra_and_timestamps(json_path: str) -> Tuple[np.ndarray, np.ndar
         ("timestamp_us", np.uint64)
     ])
 
-    memmap_path = "C:\\Users\\Moritz\\Desktop\\TESTDATA\\2025\\STRA\\250903\\250903_003\\250903_003.npy"
-
     # Read the data and convert from memmap to standard numpy arrays
     mmap = np.memmap(memmap_path, dtype=dtype, mode="r")
     return np.array(mmap["spectrum"]), np.array(mmap["timestamp_us"])
