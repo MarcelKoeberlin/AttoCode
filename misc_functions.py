@@ -372,3 +372,14 @@ def distance_mm_to_delay_fs(distance_mm: float) -> float:
     c_mm_per_ns = 299.792458  # speed of light in mm/ns
     delay_fs = (2 * distance_mm / c_mm_per_ns) * 1e6  # factor 2 for round-trip, ns -> fs
     return delay_fs
+
+def delay_fs_to_distance_mm(delay_fs: float) -> float:
+    """
+    Convert optical delay in femtoseconds to delay stage travel distance in millimeters.
+
+    :param delay_fs: Time delay in femtoseconds.
+    :return: Corresponding distance moved by the delay stage in millimeters.
+    """
+    c_mm_per_ns = 299.792458  # speed of light in mm/ns
+    distance_mm = (delay_fs / 1e6) * c_mm_per_ns / 2  # factor 2 for round-trip, fs -> ns
+    return distance_mm

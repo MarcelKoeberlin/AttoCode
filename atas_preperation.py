@@ -29,13 +29,28 @@ import numpy as np
 
 # Assuming the 'misc_functions' module is in the specified path and contains the necessary plotting functions.
 sys.path.append('C:\\Users\\Moritz\\OneDrive - ETH Zurich\\Code for ThinkPad to test!')
-from misc_functions import atas_on_off_clas, plot_on_off_clas_shift_sweep, distance_mm_to_delay_fs
+from misc_functions import atas_on_off_clas, plot_on_off_clas_shift_sweep
+
+# GLOBAL CONSTANTS #############################################################
+SYNC_GAPS_PATTERN = [1, 4, 3, 3, 1]  # Always the same for all measurements
+XUV_EV_CALIBRATION_FILE = "Spec.txt"  # Always the same for all measurements
+
+# MEASUREMENT CONFIGURATION ####################################################
+# Manually define these parameters for each measurement
+XUV_DATE = "250903"                         # YYMMDD format
+XUV_SEQUENCE = 3                            # X for YYMMDD_00X
+DELAY_STAGE_DATE = XUV_DATE                 # YYMMDD format (same as XUV_DATE typically)
+DELAY_STAGE_SEQUENCE = XUV_SEQUENCE         # X for YYMMDD_00X (can be different from XUV)
+SYNC_PATTERN_TOLERANCE_US = 40000           # Tolerance for detecting sync pattern gaps
+SYNC_PULSES_TO_SKIP = 3                     # Number of initial pulses to discard
+PULSES_TO_SKIP_BEFORE_FIRST_SHUTTER = 5     # Number of pulses to skip before shutter
+SHIFT = -1                                  # Manual shift for ON/OFF labelling
 
 
 class Paths:
     """Defines the main directory paths for input data."""
     BASE_DIR = r"C:\Users\Moritz\Desktop\TESTDATA"
-    DELAY_STAGE_TIMES = r"Z:\\Personal\\MoritzJ\\10_measurements\\04_Delay_Stage"
+    SERVER_DIR = r"Z:\Attoline"  # Base server directory
     # The folder where all generated plots and data will be stored.
     OUTPUT_FOLDER = r"C:\Users\Moritz\Desktop\Pixis_data\output"
 
@@ -67,66 +82,43 @@ def find_xuv_files(yymmdd: str, sequence_num: int) -> Tuple[str, str]:
         
     return json_path, npy_path
 
-class TrainingSets:
-    """
-    Contains configurations for different experimental measurement sets.
-    Each dictionary defines file locations and processing parameters.
-    """
-    TS0028 = {
-        "Name": "TS0028",
-        "Comment": "28ms acquisition time, ATAS, stab off",
-        "XUV_date": "250903",  # YYMMDD format
-        "XUV_sequence": 3,     # X for YYMMDD_00X
-        "DELAY_STAGE_date": "2025_07_24-21_55_56",
-        "XUV_eV_calibration_file": "Spec.txt",  # Always the same
-        # Gaps between sync pulses in microseconds. Always the same pattern.
-        "SYNC_GAPS_PATTERN": [1, 4, 3, 3, 1],
-        # Tolerance for detecting the sync pattern gaps.
-        "SYNC_PATTERN_TOLERANCE_US": 40000,
-        # Number of initial pulses in a chunk to discard (related to sync sequence).
-        "SYNC_PULSES_TO_SKIP": 3,
-        # Number of pulses to discard before the first shutter action begins.
-        "PULSES_TO_SKIP_BEFORE_FIRST_SHUTTER": 5,
-        # Manual shift of the ON/OFF labelling, in units of pulses.
-        "SHIFT": -1,
-    }
 
-    # --- Select the desired training set for processing here ---
-    SELECTED = TS0028
+def find_delay_stage_file(yymmdd: str, sequence_num: int) -> str:
+    """
+    Find delay stage .npz file based on the new directory structure.
     
-    @staticmethod
-    def create_training_set(name: str, comment: str, xuv_date: str, xuv_sequence: int, 
-                          delay_stage_date: str, sync_pulses_to_skip: int = 3,
-                          pulses_to_skip_before_first_shutter: int = 5, shift: int = -1) -> dict:
-        """
-        Helper function to create a new training set with default values.
+    Directory structure: server_dir/2025/DelayStage/2025/DelayStage/YYMMDD/YYMMDD_XXX/delay_YYMMDD_SXXX.npz
+    
+    Args:
+        yymmdd: Date in YYMMDD format (e.g., "250903")
+        sequence_num: Sequence number (e.g., 2 for S002)
         
-        Args:
-            name: Name of the training set
-            comment: Description of the experiment
-            xuv_date: Date in YYMMDD format
-            xuv_sequence: Sequence number (1 for _001, 2 for _002, etc.)
-            delay_stage_date: Delay stage timestamp format
-            sync_pulses_to_skip: Number of sync pulses to skip
-            pulses_to_skip_before_first_shutter: Number of pulses to skip before shutter
-            shift: Manual shift for ON/OFF labelling
+    Returns:
+        Full path to the delay stage .npz file
+    """
+    year = "20" + yymmdd[:2]  # Convert YY to YYYY
+    sequence_str = f"{yymmdd}_{sequence_num:03d}"
+    
+    # Build the directory path: server_dir/2025/DelayStage/2025/DelayStage/250903/250903_002/
+    data_dir = os.path.join(
+        Paths.SERVER_DIR, 
+        year, 
+        "DelayStage", 
+        year, 
+        "DelayStage", 
+        yymmdd, 
+        sequence_str
+    )
+    
+    # Build the filename: delay_250903_S002.npz
+    filename = f"delay_{yymmdd}_S{sequence_num:03d}.npz"
+    npz_path = os.path.join(data_dir, filename)
+    
+    if not os.path.exists(npz_path):
+        raise FileNotFoundError(f"Delay stage NPZ file not found: {npz_path}")
         
-        Returns:
-            Dictionary with training set configuration
-        """
-        return {
-            "Name": name,
-            "Comment": comment,
-            "XUV_date": xuv_date,
-            "XUV_sequence": xuv_sequence,
-            "DELAY_STAGE_date": delay_stage_date,
-            "XUV_eV_calibration_file": "Spec.txt",  # Always the same
-            "SYNC_GAPS_PATTERN": [1, 4, 3, 3, 1],  # Always the same
-            "SYNC_PATTERN_TOLERANCE_US": 40000,
-            "SYNC_PULSES_TO_SKIP": sync_pulses_to_skip,
-            "PULSES_TO_SKIP_BEFORE_FIRST_SHUTTER": pulses_to_skip_before_first_shutter,
-            "SHIFT": shift,
-        }
+    return npz_path
+
 
 class Settings:
     """Contains global settings and flags for the script's execution."""
@@ -180,18 +172,17 @@ def load_xuv_spectra_and_timestamps(json_path: str) -> Tuple[np.ndarray, np.ndar
     ])
 
     memmap_path = "C:\\Users\\Moritz\\Desktop\\TESTDATA\\2025\\STRA\\250903\\250903_003\\250903_003.npy"
-    print(memmap_path)
-    print("-------------")
+
     # Read the data and convert from memmap to standard numpy arrays
     mmap = np.memmap(memmap_path, dtype=dtype, mode="r")
     return np.array(mmap["spectrum"]), np.array(mmap["timestamp_us"])
 
 
 def load_delay_stage_data(filename: str) -> Tuple[np.ndarray, int, int, int, Optional[float]]:
-    """Reads delay stage data, extracting timestamps and experimental parameters from the filename.
+    """Reads delay stage data, extracting timestamps and experimental parameters from the .npz file.
 
     Args:
-        filename: Path to the .npz file containing delay stage timestamps.
+        filename: Path to the .npz file containing delay stage timestamps and parameters.
 
     Returns:
         A tuple containing:
@@ -199,27 +190,59 @@ def load_delay_stage_data(filename: str) -> Tuple[np.ndarray, int, int, int, Opt
         - ppas (int): Pulses per acquisition step.
         - spss (int): Spectra per shutter step (duration of ON or OFF block).
         - spds (int): Steps per delay scan (number of ON/OFF pairs).
-        - delay_stepsize_mm (float | None): Delay step size in mm, if found.
+        - move_step_fs (float | None): Move step size in femtoseconds, if found.
     """
     if not os.path.exists(filename):
         raise FileNotFoundError(f"File not found: {filename}")
-
-    # Load timestamp data from the memmap file, filtering out any zero entries.
-    mmap_data = np.memmap(filename, dtype='int64', mode='r')
-    timestamps_us = np.array(mmap_data[mmap_data > 0])
-
-    # Use regex to parse experimental parameters from the filename string.
-    match = re.search(r"ppas_(\d+)_spss_(\d+)_spds_(\d+)", filename)
-    if not match:
-        raise ValueError("Could not find ppas, spss, and spds in delay stage filename.")
-    ppas = int(match.group(1))
-    spss = int(match.group(2))
-    spds = int(match.group(3))
-
-    delay_match = re.search(r"step_([\d\.]+)mm", filename)
-    delay_stepsize_mm = float(delay_match.group(1)) if delay_match else None
-
-    return timestamps_us, ppas, spss, spds, delay_stepsize_mm
+    
+    # Load data from the .npz file
+    print('filename:', filename)
+    
+    try:
+        npz_data = np.load(filename)
+        available_keys = list(npz_data.keys())
+        print(f"Available arrays in .npz file: {available_keys}")
+        
+        # Load timestamps
+        timestamp_key = None
+        for key in ['timestamps', 'timestamps_us', 'data', 'arr_0']:
+            if key in available_keys:
+                timestamp_key = key
+                break
+        
+        if timestamp_key is None:
+            raise ValueError(f"Could not find timestamp data in .npz file. Available keys: {available_keys}")
+        
+        timestamps_us = np.array(npz_data[timestamp_key])
+        timestamps_us = timestamps_us[timestamps_us > 0]  # Filter out zero entries
+        print(f"Using key '{timestamp_key}' for timestamp data")
+        
+        # Load parameters from .npz file variables
+        ppas = int(npz_data['ppas']) if 'ppas' in available_keys else None
+        spss = int(npz_data['spss']) if 'spss' in available_keys else None
+        spds = int(npz_data['spds']) if 'spds' in available_keys else None
+        move_step_fs = float(npz_data['move_step_fs']) if 'move_step_fs' in available_keys else None
+        
+        # Check that required parameters were found
+        if ppas is None or spss is None or spds is None:
+            # Fallback: try to parse from filename for backward compatibility
+            print("Warning: Could not find ppas, spss, spds in .npz file, trying filename parsing...")
+            match = re.search(r"ppas_(\d+)_spss_(\d+)_spds_(\d+)", filename)
+            if not match:
+                raise ValueError("Could not find ppas, spss, and spds in .npz file or filename.")
+            ppas = int(match.group(1))
+            spss = int(match.group(2))
+            spds = int(match.group(3))
+        
+        print(f"Parameters: ppas={ppas}, spss={spss}, spds={spds}, move_step_fs={move_step_fs}")
+        
+        return timestamps_us, ppas, spss, spds, move_step_fs
+        
+    except Exception as e:
+        raise ValueError(f"Error loading .npz file: {e}")
+    finally:
+        if 'npz_data' in locals():
+            npz_data.close()
 
 
 def find_sync_patterns(timestamps_us: np.ndarray, expected_gaps_us: List[int], tolerance_us: int) -> np.ndarray:
@@ -405,50 +428,47 @@ def create_on_off_mask(chunk_length: int, spss: int, spds: int,
 
 def main():
     """Main function to run the data processing pipeline."""
-    config = TrainingSets.SELECTED
-
+    
     # --- 1. Setup and Data Loading ---
     print("\n--- LOADING DATA ---")
     if not os.path.exists(Paths.OUTPUT_FOLDER):
         os.makedirs(Paths.OUTPUT_FOLDER)
         print(f"Created output directory: {Paths.OUTPUT_FOLDER}")
 
-    print(f"Selected training set: {config['Name']} ({config['Comment']})")
-
+    print(f"XUV Date: {XUV_DATE}, Sequence: {XUV_SEQUENCE}")
+    print(f"Delay Stage Date: {DELAY_STAGE_DATE}, Sequence: {DELAY_STAGE_SEQUENCE}")
+    
     # Find XUV files using the new directory structure
-    xuv_json_path, xuv_npy_path = find_xuv_files(config["XUV_date"], config["XUV_sequence"])
+    xuv_json_path, xuv_npy_path = find_xuv_files(XUV_DATE, XUV_SEQUENCE)
     print(f"XUV JSON: {xuv_json_path}")
     print(f"XUV NPY: {xuv_npy_path}")
 
-    # Find delay stage file (still uses old naming convention)
-    delay_file = [f for f in os.listdir(Paths.DELAY_STAGE_TIMES) if f.startswith(config["DELAY_STAGE_date"]) and f.endswith(".npz")]
-    if len(delay_file) != 1:
-        raise FileNotFoundError(f"Could not find exactly one delay stage file. Found: {delay_file}")
-    delay_file_path = os.path.join(Paths.DELAY_STAGE_TIMES, delay_file[0])
+    # Find delay stage file using the new directory structure
+    delay_file_path = find_delay_stage_file(DELAY_STAGE_DATE, DELAY_STAGE_SEQUENCE)
     print(f"Delay stage file: {delay_file_path}")
 
     # Load data from files
-
     xuv_spectra, xuv_timestamps_us = load_xuv_spectra_and_timestamps(xuv_json_path)
-    delay_timestamps_us, ppas, spss, spds, delay_stepsize_mm = load_delay_stage_data(delay_file_path)
+    print(load_delay_stage_data(delay_file_path))
+    delay_timestamps_us, ppas, spss, spds, move_step_fs = load_delay_stage_data(delay_file_path)
     
     # Load energy calibration file from the workspace directory (always Spec.txt)
-    spec_file_path = os.path.join(os.path.dirname(__file__), config["XUV_eV_calibration_file"])
+    spec_file_path = os.path.join(os.path.dirname(__file__), XUV_EV_CALIBRATION_FILE)
     xuv_energy_ev = np.loadtxt(spec_file_path)
     print("\nLOADED DATA SHAPES:")
     print(f"\tXUV Spectra: {xuv_spectra.shape}")
     print(f"\tXUV Timestamps: {xuv_timestamps_us.shape}")
     print(f"\tDelay Timestamps: {delay_timestamps_us.shape}")
-    print(f"\tSPSS: {spss}, SPDS: {spds}, Delay Step: {delay_stepsize_mm} mm")
-    if delay_stepsize_mm is not None:
-        print(f"\tDelay step in fs: {distance_mm_to_delay_fs(delay_stepsize_mm):.2f} fs")
+    print(f"\tSPSS: {spss}, SPDS: {spds}, Move Step: {move_step_fs} fs")
+    if move_step_fs is not None:
+        print(f"\tMove step in fs: {move_step_fs:.2f} fs")
     print(f"\tPPAS: {ppas}")
     # --- 2. Synchronisation and Chunking ---
     print("\n--- SYNCHRONISING DATA ---")
     # Find sync patterns in the XUV data, which mark the beginning of each delay scan.
     # An offset of +2 is added based on empirical observation of the acquisition timing.
-    sync_gaps_us = [element * (ppas * (1 / 1030) * 1e6) for element in config["SYNC_GAPS_PATTERN"]]
-    sync_indices = find_sync_patterns(xuv_timestamps_us, sync_gaps_us, config["SYNC_PATTERN_TOLERANCE_US"]) + 2
+    sync_gaps_us = [element * (ppas * (1 / 1030) * 1e6) for element in SYNC_GAPS_PATTERN]
+    sync_indices = find_sync_patterns(xuv_timestamps_us, sync_gaps_us, SYNC_PATTERN_TOLERANCE_US) + 2
 
     expected_scans = len(delay_timestamps_us) // 2
     print(f"Expected {expected_scans} scans based on delay stage triggers.")
@@ -498,9 +518,9 @@ def main():
         chunk_length=chunk_length,
         spss=spss,
         spds=spds,
-        sync_pulses_to_skip=config["SYNC_PULSES_TO_SKIP"],
-        pulses_to_skip=config["PULSES_TO_SKIP_BEFORE_FIRST_SHUTTER"],
-        shift=config["SHIFT"]
+        sync_pulses_to_skip=SYNC_PULSES_TO_SKIP,
+        pulses_to_skip=PULSES_TO_SKIP_BEFORE_FIRST_SHUTTER,
+        shift=SHIFT
     )
 
     # Prepare lists to hold the restructured data for plotting.
@@ -539,8 +559,16 @@ def main():
 
     # --- 4. Plotting Results ---
     print("\n--- PLOTTING RESULTS ---")
-    if not delay_stepsize_mm:
-        delay_stepsize_mm = 0.05 # Default value if not found in filename
+    
+    # Convert move_step_fs to delay_stepsize_mm for plotting functions
+    # If move_step_fs is not available, use a default value
+    if move_step_fs is not None:
+        # Convert fs to mm: 1 fs = c * 1e-15 / 2 meters (round trip)
+        # c = 3e8 m/s, so 1 fs = 1.5e-7 m = 0.15 mm
+        delay_stepsize_mm = move_step_fs * 0.15e-3  # Convert fs to mm
+        print(f"Using move step: {move_step_fs} fs = {delay_stepsize_mm:.6f} mm")
+    else:
+        delay_stepsize_mm = 0.05  # Default value if not found
         print(f"Using default delay step size: {delay_stepsize_mm} mm")
 
     # Apply a mask to focus on a relevant energy range.
