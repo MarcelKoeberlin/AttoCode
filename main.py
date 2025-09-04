@@ -6,52 +6,42 @@ from datetime import datetime
 from pynput import keyboard
 from pylablib.devices import PrincetonInstruments
 import gc
-import h5py
-import threading
-import shutil
 
 # Global stop flag
 stop_loop = False
-copy_thread_stop_event = threading.Event()
 
 # PATHS ########################################################################
 class Paths:
-    BASE_DIR = r"C:\Users\Moritz\Desktop\ATAS local"
-    SERVER_DIR = r"Z:\Attoline" # <--- CHANGE THIS to your server path
+    BASE_DIR = r"C:\Users\Moritz\Desktop\TESTDATA"
 
 
 # DIRECTORY AND FILE MANAGEMENT ###############################################
 def create_data_directory_and_paths():
     """
-    Creates the directory structure: base_dir/YYYY/STRA_new/YYMMDD/YYMMDD_XXX/
-    and server_dir/YYYY/STRA_new/YYMMDD/YYMMDD_XXX/
-    Returns the local directory path, server directory path, and base filename.
+    Creates the directory structure: base_dir/YYYY/STRA/YYMMDD/YYMMDD_XXX/
+    Returns the directory path and base filename (without extension).
     Automatically increments XXX if directory already exists.
     """
     now = datetime.now()
     year = now.strftime("%Y")
     date_str = now.strftime("%y%m%d")
     
-    # Create the base directory structure for local and server
-    local_year_dir = os.path.join(Paths.BASE_DIR, year)
-    local_STRA_new_dir = os.path.join(local_year_dir, "STRA_new")
-    local_date_dir = os.path.join(local_STRA_new_dir, date_str)
+    # Create the base directory structure
+    year_dir = os.path.join(Paths.BASE_DIR, year)
+    stra_dir = os.path.join(year_dir, "STRA")
+    date_dir = os.path.join(stra_dir, date_str)
     
-    server_year_dir = os.path.join(Paths.SERVER_DIR, year)
-    server_STRA_new_dir = os.path.join(server_year_dir, "STRA_new")
-    server_date_dir = os.path.join(server_STRA_new_dir, date_str)
-
-    # Create local directories if they don't exist
-    os.makedirs(local_date_dir, exist_ok=True)
+    # Create directories if they don't exist
+    os.makedirs(date_dir, exist_ok=True)
     
     # Find the next available sequence number
     sequence_num = 1
     while True:
         sequence_str = f"{date_str}_{sequence_num:03d}"
-        final_local_dir = os.path.join(local_date_dir, sequence_str)
+        final_dir = os.path.join(date_dir, sequence_str)
         
-        if not os.path.exists(final_local_dir):
-            os.makedirs(final_local_dir, exist_ok=True)
+        if not os.path.exists(final_dir):
+            os.makedirs(final_dir, exist_ok=True)
             break
         
         sequence_num += 1
@@ -59,45 +49,9 @@ def create_data_directory_and_paths():
         # Safety check to prevent infinite loop
         if sequence_num > 999:
             raise ValueError("Too many acquisitions for this date (>999)")
-
-    final_server_dir = os.path.join(server_date_dir, sequence_str)
-    # The copy thread will create the server directory.
-
-    base_filename = sequence_str
-    return final_local_dir, final_server_dir, base_filename
-
-# COPY THREAD #################################################################
-def copy_to_server_thread(local_path, server_path):
-    """
-    Continuously tries to copy a file to the server until the stop event is set.
-    """
-    while not copy_thread_stop_event.is_set():
-        try:
-            # Check if local file exists and has content before copying
-            if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-                # Check if server file needs updating
-                if not os.path.exists(server_path) or os.path.getsize(server_path) != os.path.getsize(local_path):
-                    print(f"Copying {local_path} to {server_path}...")
-                    server_dir = os.path.dirname(server_path)
-                    os.makedirs(server_dir, exist_ok=True)
-                    shutil.copy2(local_path, server_path)
-                    print("Copy successful.")
-        except Exception as e:
-            print(f"Error copying to server: {e}. Retrying in 10 seconds...")
-        
-        # Wait for 10 seconds or until stop event is set
-        copy_thread_stop_event.wait(10)
     
-    # Final copy attempt after loop ends
-    try:
-        print(f"Final copy attempt for {local_path} to {server_path}...")
-        server_dir = os.path.dirname(server_path)
-        os.makedirs(server_dir, exist_ok=True)
-        shutil.copy2(local_path, server_path)
-        print("Final copy successful.")
-    except Exception as e:
-        print(f"Final copy attempt failed: {e}")
-
+    base_filename = sequence_str
+    return final_dir, base_filename
 
 # SETTINGS #####################################################################
 class Settings:
@@ -118,9 +72,8 @@ def main():
     listener.start()
 
     # Create directory structure and get file paths
-    local_data_dir, server_data_dir, base_filename = create_data_directory_and_paths()
-    print(f"Local data directory: {local_data_dir}")
-    print(f"Server data directory: {server_data_dir}")
+    data_dir, base_filename = create_data_directory_and_paths()
+    print(f"Data directory: {data_dir}")
     print(f"Base filename: {base_filename}")
 
     timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
@@ -174,25 +127,15 @@ def main():
     # Set up acquisition
     cam.setup_acquisition(mode="sequence", nframes=Settings.NUMBER_OF_IMAGES)
 
-    # HDF5 setup
-    h5_path = os.path.join(local_data_dir, f"{base_filename}.h5")
-    h5_server_path = os.path.join(server_data_dir, f"{base_filename}.h5")
-    
-    h5file = h5py.File(h5_path, 'w')
-    spectra_ds = h5file.create_dataset(
-        "spectra", 
-        (0, Settings.SPECTRA_SHAPE[1]), 
-        maxshape=(None, Settings.SPECTRA_SHAPE[1]), 
-        dtype='uint16', 
-        chunks=(100, Settings.SPECTRA_SHAPE[1])
-    )
-    timestamps_ds = h5file.create_dataset(
-        "timestamps_us", 
-        (0,), 
-        maxshape=(None,), 
-        dtype='uint64', 
-        chunks=(100,)
-    )
+    # Structured dtype for mmap
+    dtype = np.dtype([
+        ("spectrum", np.uint16, Settings.SPECTRA_SHAPE[1]),
+        ("timestamp_us", np.uint64)
+    ])
+    mmap_path = os.path.join(data_dir, f"{base_filename}.npy")
+    mmap = np.memmap(mmap_path, dtype=dtype, mode="w+", shape=(Settings.NUMBER_OF_IMAGES,))
+    mmap[:] = 0
+    mmap.flush()
 
     # Save metadata
     start_time_unix = time.time()
@@ -203,17 +146,17 @@ def main():
         "spectra_shape": Settings.SPECTRA_SHAPE,
         "number_of_images_planned": Settings.NUMBER_OF_IMAGES,
         "start_time_unix": start_time_unix,
-        "hdf5_file": os.path.basename(h5_path),
+        "memmap_file": os.path.basename(mmap_path),
+        "dtype": {
+            "spectrum": "uint16",
+            "timestamp_us": "uint64"
+        },
         "camera_attributes_at_start": [list(item) for item in all_attrs_at_start.items()],
         "camera_attributes_measurement": [list(item) for item in all_attrs_measurement.items()]
     }
-    metadata_path = os.path.join(local_data_dir, f"{base_filename}.json")
+    metadata_path = os.path.join(data_dir, f"{base_filename}.json")
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=4)
-
-    # Start the copy thread
-    copier_thread = threading.Thread(target=copy_to_server_thread, args=(h5_path, h5_server_path))
-    copier_thread.start()
 
     # Start acquisition
     print("Starting acquisition... (Press 'Esc' to stop early)")
@@ -236,15 +179,11 @@ def main():
             # Efficient max value extraction
             max_val = data.max()
 
-            # Append data to HDF5 datasets
-            spectra_ds.resize(i + 1, axis=0)
-            spectra_ds[i, :] = data.ravel().astype(np.uint16)
-            timestamps_ds.resize(i + 1, axis=0)
-            timestamps_ds[i] = timestamp_us
+            mmap[i] = (data.ravel().astype(np.uint16), timestamp_us)
 
             if i % 100 == 0:
-                h5file.flush()
-                print(f"Image {i} flushed to HDF5.")
+                mmap.flush()
+                print(f"Image {i} flushed.")
 
             dt = t_now - t_prev
 
@@ -264,21 +203,19 @@ def main():
             i += 1
 
     finally:
+        # Final flush
+        mmap.flush()
+        del mmap
+        gc.collect()
+
+        # remove zeros from memmap
+        print("Cleaning memmap...")
+        load_and_clean_memmap(mmap_path, Settings.SPECTRA_SHAPE[1])
+
         # Stop acquisition
         if cam.acquisition_in_progress():
             cam.stop_acquisition()
         cam.clear_acquisition()
-
-        # Close HDF5 file
-        if 'h5file' in locals() and h5file.id:
-            h5file.close()
-            print("HDF5 file closed.")
-
-        # Signal the copy thread to stop and wait for it
-        print("Signaling copy thread to stop...")
-        copy_thread_stop_event.set()
-        copier_thread.join()
-        print("Copy thread finished.")
 
         # Reset original camera settings
         print("\nResetting camera to original settings:")
@@ -310,7 +247,7 @@ def main():
             json.dump(metadata, f, indent=4)
 
         print(f"Acquisition complete. Images acquired: {i}, Number of Violations: {len(violations)}")
-        #print(rf"Violations at: {violations}")
+        print(rf"Violations at: {violations}")
 
 
 # PRINT ROI HELPER ############################################################
@@ -336,6 +273,58 @@ def on_press(key):
     except AttributeError:
         pass
 
+# CLEAR ZEROS FROM MEMMAP #######################################################
+def load_and_clean_memmap(file_path: str, spectrum_length: int) -> None:
+    """
+    Loads the memmap, removes all-zero rows, and overwrites the original file safely via a temp file.
+
+    :param file_path: Path to the .npy file.
+    :param spectrum_length: Length of the spectrum.
+    """
+    import numpy as np
+    import os
+    import tempfile
+    import gc
+
+    print(f"Loading memmap from: {file_path}")
+
+    dtype = np.dtype([
+        ("intensities", np.uint16, spectrum_length),
+        ("timestamp_us", np.uint64)
+    ])
+
+    # Step 1: Open and filter data
+    mmap = np.memmap(file_path, dtype=dtype, mode="r")
+    nonzero_mask = ~(
+        (mmap["timestamp_us"] == 0) &
+        (np.all(mmap["intensities"] == 0, axis=1))
+    )
+    cleaned_data = mmap[nonzero_mask].copy()  # Load into RAM
+    print(f"Original rows: {len(mmap)}, Non-zero rows: {len(cleaned_data)}")
+
+    # Step 2: Fully release original mmap (important on Windows)
+    if hasattr(mmap, '_mmap'):
+        mmap._mmap.close()
+    del mmap
+    gc.collect()
+
+    # Step 3: Write to a temporary file
+    temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(file_path))
+    os.close(temp_fd)
+
+    cleaned_mmap = np.memmap(temp_path, dtype=dtype, mode="w+", shape=(len(cleaned_data),))
+    cleaned_mmap[:] = cleaned_data
+    cleaned_mmap.flush()
+
+    if hasattr(cleaned_mmap, '_mmap'):
+        cleaned_mmap._mmap.close()
+    del cleaned_mmap
+    gc.collect()
+
+    # Step 4: Atomically replace original file
+    os.replace(temp_path, file_path)
+
+    print(f"Cleaned memmap saved to: {file_path}")
 
 # RUN SCRIPT ##################################################################
 if __name__ == "__main__":
