@@ -11,6 +11,7 @@ from pylablib.devices import PrincetonInstruments
 from collections import deque
 from matplotlib.widgets import Button, TextBox
 import os
+import datetime
 
 # --- Configuration ---
 # A class to hold all settings for easy modification.
@@ -31,6 +32,10 @@ def main():
     """Initializes the camera, sets up the plot, and runs the live display."""
     
     # --- 1. Initialization and Setup ---
+    
+    # Define the base directory for saving files.
+    base_dir = os.path.join(os.path.expanduser("~"), "XUV_data") #C:\Users\Moritz\XUV_data
+    base_dir = r'Z:\Attoline\TEST'
     
     # Load the energy axis from the calibration file.
     try:
@@ -100,6 +105,9 @@ def main():
     bar_container = ax_std_gauge.bar(0, 0, color='#33A02C', width=1.0)
     std_dev_bar_patch = bar_container[0]
 
+    # Artist for showing save status. Attached to an axes for blitting compatibility.
+    save_status_text = ax_max_trace.text(0.75, 1.4, '', ha='center', va='bottom', fontsize=10, color='#33A02C', transform=ax_max_trace.transAxes)
+
     # --- Styling for the Spectrum Plot (ax_spec) ---
     ax_spec.set_title("Use up/down arrow keys to adjust Y-axis", loc='left')
     ax_spec.set_xlabel("Energy (eV)")
@@ -152,13 +160,61 @@ def main():
         animation.event_source.start() # Resume animation.
 
     def on_keep_clicked(event):
-        """Saves the current spectrum as a reference line."""
-        data = cam.read_newest_image()
-        if data is not None:
-            spectrum = data.ravel().astype(np.uint16)
-            ref_line.set_ydata(spectrum.copy())
-            ref_line.set_visible(True)
-            print("Reference spectrum updated.")
+        """Averages the spectra from the last 2 seconds and keeps it as a reference."""
+        if not spectrum_buffer_2s:
+            print("No spectra in the buffer to average.")
+            return
+
+        # Extract spectra from the buffer
+        spectra_to_average = np.array([item[1] for item in spectrum_buffer_2s])
+        
+        # Calculate the mean spectrum
+        averaged_spectrum = np.mean(spectra_to_average, axis=0)
+        
+        ref_line.set_ydata(averaged_spectrum)
+        ref_line.set_visible(True)
+        print("Kept the average of the last 2 seconds.")
+
+    def on_save_clicked(event):
+        """Saves the 'kept' spectrum to an npz file."""
+        if not ref_line.get_visible():
+            save_status_text.set_text("No 'kept' spectrum to save. Click 'Keep' first.")
+            fig.canvas.draw_idle()
+            print("No 'kept' spectrum to save. Click 'Keep' first.")
+            return
+
+        kept_spectrum = ref_line.get_ydata()
+        
+        # --- File Path and Naming Logic ---
+        now = datetime.datetime.now()
+        year_str = now.strftime("%Y")
+        date_str_long = now.strftime("%y%m%d")
+        
+        # Construct the directory path
+        save_dir = os.path.join(base_dir, year_str, "XUV", date_str_long)
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Find the next available file number for the current day
+        file_index = 1
+        while True:
+            filename = f"XUV_{date_str_long}_{file_index:04d}.npz"
+            filepath = os.path.join(save_dir, filename)
+            if not os.path.exists(filepath):
+                break
+            file_index += 1
+            
+        # --- Save the Data ---
+        try:
+            np.savez_compressed(filepath, energy_eV=energy_eV, counts=kept_spectrum)
+            status_msg = f"Saved to: {filepath}"
+            print(status_msg)
+            save_status_text.set_text(status_msg)
+        except Exception as e:
+            status_msg = f"Error saving file: {e}"
+            print(status_msg)
+            save_status_text.set_text(status_msg)
+        
+        fig.canvas.draw_idle()
 
     def on_roi_submit(text):
         """Updates the ROI for the standard deviation calculation from text boxes."""
@@ -191,8 +247,12 @@ def main():
     fig.canvas.mpl_connect('key_press_event', on_key)
 
     keep_button_ax = fig.add_axes([0.01, 0.92, 0.08, 0.06])
-    keep_button = Button(keep_button_ax, "Keep", color='lightgreen', hovercolor='green')
+    keep_button = Button(keep_button_ax, "Keep", color='#D95319', hovercolor='#FF7F0E')
     keep_button.on_clicked(on_keep_clicked)
+
+    save_button_ax = fig.add_axes([0.01, 0.84, 0.08, 0.06])
+    save_button = Button(save_button_ax, "Save", color='#1F77B4', hovercolor='#4DBEEE')
+    save_button.on_clicked(on_save_clicked)
 
     ax_roi_min = fig.add_axes([0.10, 0.92, 0.1, 0.06])
     text_box_min = TextBox(ax_roi_min, 'Min (eV)', initial=f"{xmin:.0f}", textalignment="right")
@@ -219,12 +279,12 @@ def main():
         # Read the latest image from the camera.
         data = cam.read_newest_image()
         if data is None:
-            return line, max_line, ref_line, std_dev_bar_patch # Return unchanged artists if no data.
+            return line, max_line, ref_line, std_dev_bar_patch, save_status_text # Return unchanged artists if no data.
 
         spectrum = data.ravel().astype(np.uint16)
         if spectrum.shape[0] != energy_eV.shape[0]:
             print(f"Warning: Unexpected spectrum shape received: {spectrum.shape}")
-            return line, max_line, ref_line, std_dev_bar_patch
+            return line, max_line, ref_line, std_dev_bar_patch, save_status_text
 
         # --- Update Spectrum Plot ---
         line.set_ydata(spectrum)
@@ -267,7 +327,7 @@ def main():
         std_dev_bar_patch.set_height(avg_norm_std_percent)
 
         # Return a tuple of all artists that were modified for blitting.
-        return line, max_line, ref_line, std_dev_bar_patch
+        return line, max_line, ref_line, std_dev_bar_patch, save_status_text
 
     # Create and start the animation.
     animation = FuncAnimation(fig, update, interval=1, blit=True, cache_frame_data=False)
