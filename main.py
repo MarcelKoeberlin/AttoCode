@@ -40,8 +40,8 @@ def create_hdf5_filepath():
     while True:
         sequence_str = f"{date_str}_{sequence_num:03d}"
         hdf5_filename = f"{sequence_str}.hdf5"
-        final_path = os.path.join(date_dir, hdf5_filename)
-        
+        final_path = os.path.join(date_dir, sequence_str, hdf5_filename)
+
         if not os.path.exists(final_path):
             break
         
