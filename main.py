@@ -55,11 +55,10 @@ def create_data_directory_and_paths():
 
 # SETTINGS #####################################################################
 class Settings:
-    EXP_TIME_MS = 25
+    EXP_TIME_MS = 20
     BINNING = (1, 400)
     SPECTRA_SHAPE = (1, 1340)
     NUMBER_OF_IMAGES = int(300e3)
-
     ACQUISITION_TIME_VIOLATION_THRESHOLD_MS = EXP_TIME_MS*1.8
 
 
