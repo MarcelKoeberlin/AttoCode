@@ -6,6 +6,7 @@ from datetime import datetime
 from pynput import keyboard
 from pylablib.devices import PrincetonInstruments
 import gc
+import h5py
 
 # Global stop flag
 stop_loop = False
@@ -16,11 +17,11 @@ class Paths:
 #Empty statement to indicate this version also works with v2
 
 # DIRECTORY AND FILE MANAGEMENT ###############################################
-def create_data_directory_and_paths():
+def create_hdf5_filepath():
     """
-    Creates the directory structure: base_dir/YYYY/STRA/YYMMDD/YYMMDD_XXX/
-    Returns the directory path and base filename (without extension).
-    Automatically increments XXX if directory already exists.
+    Creates the directory structure: base_dir/YYYY/STRA/YYMMDD/
+    and returns the full path for a new HDF5 file: YYMMDD_XXX.hdf5.
+    Automatically increments XXX if the file already exists.
     """
     now = datetime.now()
     year = now.strftime("%Y")
@@ -38,10 +39,10 @@ def create_data_directory_and_paths():
     sequence_num = 1
     while True:
         sequence_str = f"{date_str}_{sequence_num:03d}"
-        final_dir = os.path.join(date_dir, sequence_str)
+        hdf5_filename = f"{sequence_str}.hdf5"
+        final_path = os.path.join(date_dir, hdf5_filename)
         
-        if not os.path.exists(final_dir):
-            os.makedirs(final_dir, exist_ok=True)
+        if not os.path.exists(final_path):
             break
         
         sequence_num += 1
@@ -49,9 +50,19 @@ def create_data_directory_and_paths():
         # Safety check to prevent infinite loop
         if sequence_num > 999:
             raise ValueError("Too many acquisitions for this date (>999)")
-    
-    base_filename = sequence_str
-    return final_dir, base_filename
+            
+    return final_path
+
+def save_dict_to_hdf5_attrs(group, metadata_dict):
+    """
+    Saves dictionary items as attributes to an HDF5 group.
+    Complex types like dicts or lists are serialized to JSON strings.
+    """
+    for key, value in metadata_dict.items():
+        if isinstance(value, (dict, list, tuple)):
+            group.attrs[key] = json.dumps(value)
+        else:
+            group.attrs[key] = value
 
 # SETTINGS #####################################################################
 class Settings:
@@ -59,7 +70,7 @@ class Settings:
     BINNING = (1, 400)
     SPECTRA_SHAPE = (1, 1340)
     NUMBER_OF_IMAGES = int(300e3)
-    ACQUISITION_TIME_VIOLATION_THRESHOLD_MS = EXP_TIME_MS*1.8
+    ACQUISITION_TIME_VIOLATION_THRESHOLD_MS = EXP_TIME_MS * 1.8
 
 
 # MAIN FUNCTION ################################################################
@@ -70,10 +81,9 @@ def main():
     listener = keyboard.Listener(on_press=on_press)
     listener.start()
 
-    # Create directory structure and get file paths
-    data_dir, base_filename = create_data_directory_and_paths()
-    print(f"Data directory: {data_dir}")
-    print(f"Base filename: {base_filename}")
+    # Create directory structure and get HDF5 file path
+    hdf5_path = create_hdf5_filepath()
+    print(f"Data will be saved to: {hdf5_path}")
 
     timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     print(f"Timestamp: {timestamp}")
@@ -126,91 +136,93 @@ def main():
     # Set up acquisition
     cam.setup_acquisition(mode="sequence", nframes=Settings.NUMBER_OF_IMAGES)
 
-    # Structured dtype for mmap
+    # Structured dtype for HDF5 dataset
     dtype = np.dtype([
         ("spectrum", np.uint16, Settings.SPECTRA_SHAPE[1]),
         ("timestamp_us", np.uint64)
     ])
-    mmap_path = os.path.join(data_dir, f"{base_filename}.npy")
-    mmap = np.memmap(mmap_path, dtype=dtype, mode="w+", shape=(Settings.NUMBER_OF_IMAGES,))
-    mmap[:] = 0
-    mmap.flush()
 
-    # Save metadata
+    # Metadata dictionary
     start_time_unix = time.time()
     metadata = {
         "timestamp": timestamp,
         "exp_time_ms": Settings.EXP_TIME_MS,
-        "binning": Settings.BINNING,
-        "spectra_shape": Settings.SPECTRA_SHAPE,
+        "binning": list(Settings.BINNING),
+        "spectra_shape": list(Settings.SPECTRA_SHAPE),
         "number_of_images_planned": Settings.NUMBER_OF_IMAGES,
         "start_time_unix": start_time_unix,
-        "memmap_file": os.path.basename(mmap_path),
-        "dtype": {
-            "spectrum": "uint16",
-            "timestamp_us": "uint64"
-        },
+        "dtype_spectrum": "uint16",
+        "dtype_timestamp_us": "uint64",
         "camera_attributes_at_start": [list(item) for item in all_attrs_at_start.items()],
         "camera_attributes_measurement": [list(item) for item in all_attrs_measurement.items()]
     }
-    metadata_path = os.path.join(data_dir, f"{base_filename}.json")
-    with open(metadata_path, "w") as f:
-        json.dump(metadata, f, indent=4)
 
-    # Start acquisition
-    print("Starting acquisition... (Press 'Esc' to stop early)")
-    cam.start_acquisition()
-
-    violations = []
-    t_prev = time.time()
     i = 0
-    # run main acquisition loop ########################################################
+    violations = []
+
+    # Use a try...finally block to ensure resources are closed properly
     try:
-        while i < Settings.NUMBER_OF_IMAGES:
-            data = cam.read_oldest_image()
-
-            if data is None:
-                time.sleep(Settings.EXP_TIME_MS / 1000 / 20)
-                continue
-
-            t_now = time.time()
-            timestamp_us = int(t_now * 1e6)
-            # Efficient max value extraction
-            max_val = data.max()
-
-            mmap[i] = (data.ravel().astype(np.uint16), timestamp_us)
-
-            if i % 100 == 0:
-                mmap.flush()
-                print(f"Image {i} flushed.")
-
-            dt = t_now - t_prev
-
-            # print status:
-            print(rf"Image no {i} acquired in {dt:.4f} s, max value: {max_val}")
-
-            if dt > Settings.ACQUISITION_TIME_VIOLATION_THRESHOLD_MS / 1000:
-                print(f"ACQUISITION TIME VIOLATION at {i}: {dt:.4f}s --------------------------------------")
-                violations.append(i)
-
-            t_prev = t_now
-
-            if stop_loop:
-                print("User interrupted acquisition with 'Esc'.")
-                break
+        with h5py.File(hdf5_path, 'w') as f:
+            # Create a resizable dataset for the spectra and timestamps
+            dset = f.create_dataset(
+                "data",
+                shape=(0,),
+                maxshape=(Settings.NUMBER_OF_IMAGES,),
+                dtype=dtype,
+                chunks=(100,)  # Chunking is important for performance
+            )
             
-            i += 1
+            # Create a group for metadata and save it as attributes
+            meta_group = f.create_group("metadata")
+            save_dict_to_hdf5_attrs(meta_group, metadata)
+            
+            # Start acquisition
+            print("Starting acquisition... (Press 'Esc' to stop early)")
+            cam.start_acquisition()
+            t_prev = time.time()
+            
+            # Run main acquisition loop
+            while i < Settings.NUMBER_OF_IMAGES:
+                data = cam.read_oldest_image()
+
+                if data is None:
+                    time.sleep(Settings.EXP_TIME_MS / 1000 / 20)
+                    continue
+
+                t_now = time.time()
+                timestamp_us = int(t_now * 1e6)
+                max_val = data.max()
+
+                # Resize dataset and write new data
+                dset.resize((i + 1,))
+                dset[i] = (data.ravel().astype(np.uint16), timestamp_us)
+                
+                # Periodically flush data to disk
+                if i % 100 == 0:
+                    f.flush()
+                    print(f"Image {i} flushed.")
+
+                dt = t_now - t_prev
+                print(rf"Image no {i} acquired in {dt:.4f} s, max value: {max_val}")
+
+                if dt > Settings.ACQUISITION_TIME_VIOLATION_THRESHOLD_MS / 1000:
+                    print(f"ACQUISITION TIME VIOLATION at {i}: {dt:.4f}s --------------------------------------")
+                    violations.append(i)
+
+                t_prev = t_now
+
+                if stop_loop:
+                    print("User interrupted acquisition with 'Esc'.")
+                    break
+                
+                i += 1
+            
+            # Final metadata update
+            meta_group.attrs["images_acquired"] = i
+            meta_group.attrs["violations"] = json.dumps(violations)
+            print("Final metadata saved.")
 
     finally:
-        # Final flush
-        mmap.flush()
-        del mmap
-        gc.collect()
-
-        # remove zeros from memmap
-        print("Cleaning memmap...")
-        load_and_clean_memmap(mmap_path, Settings.SPECTRA_SHAPE[1])
-
         # Stop acquisition
         if cam.acquisition_in_progress():
             cam.stop_acquisition()
@@ -239,11 +251,7 @@ def main():
         cam.close()
         print("Camera connection closed.")
 
-        # Finalize metadata
-        metadata["images_acquired"] = i
-        metadata["violations"] = violations
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=4)
+        gc.collect()
 
         print(f"Acquisition complete. Images acquired: {i}, Number of Violations: {len(violations)}")
         print(rf"Violations at: {violations}")
@@ -253,12 +261,12 @@ def main():
 def print_roi(cam) -> None:
     roi = cam.get_roi()
     print("ROI settings:")
-    print(f"  Horizontal start:  {roi[0]}")
-    print(f"  Horizontal end:    {roi[1]}")
-    print(f"  Vertical start:    {roi[2]}")
-    print(f"  Vertical end:      {roi[3]}")
-    print(f"  Horizontal binning:{roi[4]}")
-    print(f"  Vertical binning:  {roi[5]}")
+    print(f"  Horizontal start:   {roi[0]}")
+    print(f"  Horizontal end:     {roi[1]}")
+    print(f"  Vertical start:     {roi[2]}")
+    print(f"  Vertical end:       {roi[3]}")
+    print(f"  Horizontal binning: {roi[4]}")
+    print(f"  Vertical binning:   {roi[5]}")
 
 
 # PYNPUT CALLBACK #############################################################
@@ -272,58 +280,6 @@ def on_press(key):
     except AttributeError:
         pass
 
-# CLEAR ZEROS FROM MEMMAP #######################################################
-def load_and_clean_memmap(file_path: str, spectrum_length: int) -> None:
-    """
-    Loads the memmap, removes all-zero rows, and overwrites the original file safely via a temp file.
-
-    :param file_path: Path to the .npy file.
-    :param spectrum_length: Length of the spectrum.
-    """
-    import numpy as np
-    import os
-    import tempfile
-    import gc
-
-    print(f"Loading memmap from: {file_path}")
-
-    dtype = np.dtype([
-        ("intensities", np.uint16, spectrum_length),
-        ("timestamp_us", np.uint64)
-    ])
-
-    # Step 1: Open and filter data
-    mmap = np.memmap(file_path, dtype=dtype, mode="r")
-    nonzero_mask = ~(
-        (mmap["timestamp_us"] == 0) &
-        (np.all(mmap["intensities"] == 0, axis=1))
-    )
-    cleaned_data = mmap[nonzero_mask].copy()  # Load into RAM
-    print(f"Original rows: {len(mmap)}, Non-zero rows: {len(cleaned_data)}")
-
-    # Step 2: Fully release original mmap (important on Windows)
-    if hasattr(mmap, '_mmap'):
-        mmap._mmap.close()
-    del mmap
-    gc.collect()
-
-    # Step 3: Write to a temporary file
-    temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(file_path))
-    os.close(temp_fd)
-
-    cleaned_mmap = np.memmap(temp_path, dtype=dtype, mode="w+", shape=(len(cleaned_data),))
-    cleaned_mmap[:] = cleaned_data
-    cleaned_mmap.flush()
-
-    if hasattr(cleaned_mmap, '_mmap'):
-        cleaned_mmap._mmap.close()
-    del cleaned_mmap
-    gc.collect()
-
-    # Step 4: Atomically replace original file
-    os.replace(temp_path, file_path)
-
-    print(f"Cleaned memmap saved to: {file_path}")
 
 # RUN SCRIPT ##################################################################
 if __name__ == "__main__":
