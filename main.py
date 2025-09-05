@@ -13,7 +13,7 @@ stop_loop = False
 # PATHS ########################################################################
 class Paths:
     BASE_DIR = r"C:\Users\Moritz\Desktop\TESTDATA"
-
+#Empty statement to indicate this version also works with v2
 
 # DIRECTORY AND FILE MANAGEMENT ###############################################
 def create_data_directory_and_paths():
