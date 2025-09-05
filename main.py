@@ -13,13 +13,13 @@ stop_loop = False
 
 # PATHS ########################################################################
 class Paths:
-    BASE_DIR = r"C:\Users\Moritz\Desktop\TESTDATA"
+    BASE_DIR = r"Z:\Attoline"
 #Empty statement to indicate this version also works with v2
 
 # DIRECTORY AND FILE MANAGEMENT ###############################################
 def create_hdf5_filepath():
     """
-    Creates the directory structure: base_dir/YYYY/STRA/YYMMDD/
+    Creates the directory structure: base_dir/YYYY/STRA_new/YYMMDD/
     and returns the full path for a new HDF5 file: YYMMDD_XXX.hdf5.
     Automatically increments XXX if the file already exists.
     """
@@ -29,28 +29,27 @@ def create_hdf5_filepath():
     
     # Create the base directory structure
     year_dir = os.path.join(Paths.BASE_DIR, year)
-    stra_dir = os.path.join(year_dir, "STRA")
+    stra_dir = os.path.join(year_dir, "STRA_new")
     date_dir = os.path.join(stra_dir, date_str)
-    
-    # Create directories if they don't exist
-    os.makedirs(date_dir, exist_ok=True)
-    
-    # Find the next available sequence number
     sequence_num = 1
+    # Find the next available sequence number
     while True:
         sequence_str = f"{date_str}_{sequence_num:03d}"
+        sequence_dir = os.path.join(date_dir, sequence_str)
         hdf5_filename = f"{sequence_str}.hdf5"
-        final_path = os.path.join(date_dir, sequence_str, hdf5_filename)
+        final_path = os.path.join(sequence_dir, hdf5_filename)
 
         if not os.path.exists(final_path):
+            # Ensure the directory for this sequence exists
+            os.makedirs(sequence_dir, exist_ok=True)
             break
-        
+
         sequence_num += 1
-        
+
         # Safety check to prevent infinite loop
         if sequence_num > 999:
             raise ValueError("Too many acquisitions for this date (>999)")
-            
+
     return final_path
 
 def save_dict_to_hdf5_attrs(group, metadata_dict):
@@ -81,9 +80,12 @@ def main():
     listener = keyboard.Listener(on_press=on_press)
     listener.start()
 
+
     # Create directory structure and get HDF5 file path
     hdf5_path = create_hdf5_filepath()
     print(f"Data will be saved to: {hdf5_path}")
+    # Ensure parent directory exists before opening file
+    os.makedirs(os.path.dirname(hdf5_path), exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     print(f"Timestamp: {timestamp}")
@@ -175,7 +177,8 @@ def main():
             # Create a group for metadata and save it as attributes
             meta_group = f.create_group("metadata")
             save_dict_to_hdf5_attrs(meta_group, metadata)
-            
+            #f.swmr_mode = True
+            #print("Writer entered SWMR mode. Acquisition starting.")
             # Start acquisition
             print("Starting acquisition... (Press 'Esc' to stop early)")
             cam.start_acquisition()
@@ -203,7 +206,11 @@ def main():
                     print(f"Image {i} flushed.")
 
                 dt = t_now - t_prev
-                print(rf"Image no {i} acquired in {dt:.4f} s, max value: {max_val}")
+                if i % 40 == 0:
+                    try:
+                        print(rf"Image no {i} acquired in {dt:.4f} s, max value: {max_val}")
+                    except Exception as e:
+                        print(f"Error occurred while logging image {i}: {e}")
 
                 if dt > Settings.ACQUISITION_TIME_VIOLATION_THRESHOLD_MS / 1000:
                     print(f"ACQUISITION TIME VIOLATION at {i}: {dt:.4f}s --------------------------------------")
