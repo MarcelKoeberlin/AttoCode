@@ -1,0 +1,66 @@
+.. _cameras_uc480:
+
+.. note::
+    General camera communication concepts are described on the corresponding :ref:`page <cameras_basics>`
+
+Uc480/uEye camera interface
+===========================
+
+This is the interface used in multiple cameras, including many simple Thorlabs and IDS cameras. It has been tested with IDS SC2592R12M and Thorlabs DCC1545M.
+
+Essentially identical interface is available under two different implementations: either as Thorlabs uc480 or as IDS uEye. Both of these seem to cover exactly the same cameras, both are freely available from the manufacturers, and both implement exactly the same functionality. However, these interfaces are not interchangeable, and each camera will only interact with one of them depending on which driver it happens to use (usually based on which of the software packages was installed last). Hence, if you have both `ThorCam <https://www.thorlabs.com/software_pages/ViewSoftwarePage.cfm?Code=ThorCam>`__ and `IDS Software Suite <https://en.ids-imaging.com/ids-software-suite.html>`__ installed, you would need to check both interfaces. Normally, the interface should correspond to the software which can connect to the camera (either ThorCam or uEye Cockpit).
+
+The code is located in :mod:`pylablib.devices.uc480`, and the main camera class is :class:`pylablib.devices.uc480.UC480Camera<.uc480.UC480Camera>`. Note that while the names only refer to uc480, the same functions and classes equally cover IDS uEye interface if the appropriate ``backend`` argument is provided.
+
+Software requirements
+-----------------------
+
+Depending on the interface, these cameras require either ``uc480.dll``, or ``ueye_api.dll``. These are automatically installed with, correspondingly, the freely available `ThorCam <https://www.thorlabs.com/software_pages/ViewSoftwarePage.cfm?Code=ThorCam>`__ software or with `IDS Software Suite <https://en.ids-imaging.com/ids-software-suite.html>`__ (upon registration; note that you need specifically IDS Software Suite, and not IDS peak). By default, the library searches for DLLs in the corresponding ``Program Files`` folder (``Thorlabs/Scientific Imaging/ThorCam`` or ``IDS/uEye``), in the locations placed in ``PATH`` during the installation, as well as in the folder containing the script. If the DLLs are located elsewhere, the path can be specified using the library parameter ``devices/dlls/uc480`` or ``devices/dlls/ueye``::
+
+    import pylablib as pll
+    pll.par["devices/dlls/uc480"] = "path/to/uc480/dlls"
+    from pylablib.devices import uc480
+    cam = uc480.UC480Camera()
+    pll.par["devices/dlls/ueye"] = "path/to/ueye/dlls"
+    cam = uc480.UC480Camera(backend="ueye")
+
+
+Connection
+-----------------------
+
+The cameras are identified by their camera ID or device ID (both starting from 1). Device ID corresponds to the connection order of the cameras: it is guaranteed to be unique, but will change if the camera is disconnected and reconnected again. On the other hand, camera ID is tied to the camera, but it is set to 1 by default for all cameras, and needs to be manually assigned using :meth:`.UC480Camera.set_camera_id`. Alternatively, one can use other characteristics (model or serial number) as a unique identifier. To list all of the connected cameras together with their basic information, you can run :func:`.uc480.list_cameras`::
+
+    >> from pylablib.devices import uc480
+    >> uc480.list_cameras()
+    [TCameraInfo(cam_id=4, dev_id=1, sens_id=11, model='SC2592R12M', serial_number='1234567890', in_use=False, status=0)]
+    >> cam = uc480.UC480Camera(cam_id=4)  # connect to the camera using cam_id
+    >> img = cam.snap()
+    >> cam.close()
+    >> cam = uc480.UC480Camera(dev_id=1)  # connecting to the same camera using dev_id
+    >> cam.close()
+    >> cam = uc480.UC480Camera()  # connecting to the first available camera
+    >> cam.close()
+
+If ``cam_id = 0`` is provided (default), the software connects to the first available camera.
+
+By default, the code above uses Thorlabs ``uc480`` interface. If you want to use ``ueye`` interface, you need to specify ``backend="ueye"`` argument to the corresponding functions and to the camera class upon creation. With that, the example above becomes::
+
+    >> from pylablib.devices import uc480
+    >> uc480.list_cameras(backend="ueye")  # list all cameras for uEye backend
+    [TCameraInfo(cam_id=4, dev_id=1, sens_id=11, model='SC2592R12M', serial_number='1234567890', in_use=False, status=0)]
+    >> cam = uc480.UC480Camera(cam_id=4, backend="ueye")  # connect to the camera using cam_id and ueye backend
+    >> img = cam.snap()
+    >> cam.close()
+
+Operation
+------------------------
+
+The operation of these cameras is relatively standard. They support all the standard methods for dealing with ROI and exposure, starting and stopping acquisition, and operating the frame reading loop. However, there's a couple of differences from the standard libraries worth highlighting:
+
+    - Some cameras support both binning (adding several pixels together) and subsampling (skipping some pixels). However, only one can be enabled at a time. They can be set independently using, correspondingly, :meth:`.UC480Camera.get_binning`/:meth:`.UC480Camera.set_binning` and :meth:`.UC480Camera.get_subsampling`/:meth:`.UC480Camera.set_subsampling`. They can also be set as binning factors in :meth:`.UC480Camera.get_roi`/:meth:`.UC480Camera.set_roi`. Whether binning or subsampling is set there can be determined by the ``roi_binning_mode`` parameter supplied on creation.
+    - Uc480 API supports many different pixel modes, including packed ones. However, pylablib currently supports only monochrome unpacked modes.
+    - Occasionally (especially at high frame rates) frames get skipped during transfer, before they are placed into the frame buffer by the camera driver. This can happen in two different ways. First, the frame is simply dropped without any indication. This typically can not be detected without using the framestamp contained in the frame info, as the frames flow appear to be uninterrupted. In the second way, the acquisition appears to get "restarted" (the internal number of acquired frames is dropped to zero), which is detected by the library. In this case there are several different ways the software can react, which are controlled using :meth:`.UC480Camera.set_frameskip_behavior`.
+      
+      The default way to address this "restart" event (``"ignore"``) is to ignore it and only adjust the internal acquired frame counter; this manifests as quietly dropped frames, exactly the same as the first kind of event. In the other method (``"skip"``), some number of frames are marked as skipped, so that the difference between the number of acquired frames and the internal framestamp is kept constant. This makes the gap explicit in the camera frame counters. Finally (``"error"``), the software can raise ``uc480FrameTransferError`` when such event is detected, which can be used to, e.g., restart the acquisition.
+    
+      One needs to keep in mind, that while the last two methods make "restarts" more explicit, they do not address the first kind of events (quiet drops). The most direct way to deal with them is to use frame information by setting ``return_info=True`` in frame reading methods like ``read_multiple_images``. This information contains the internal camera framestamp, which lets one detect any skipped frames.

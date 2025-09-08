@@ -1,0 +1,13 @@
+numba>=0.53.0
+numpy>=1.21.0
+pandas>=1.2.0
+pyft232>=0.12
+PyQt5>=5.15
+pyqtgraph>=0.12.1
+pyserial>=3.5
+pyusb>=1.1.1
+PyVISA>=1.11.3
+rpyc>=5.0.1
+scipy>=1.7.0
+sphinxcontrib-spelling>=7.7.0
+sphinx-rtd-theme>=1.0.0
