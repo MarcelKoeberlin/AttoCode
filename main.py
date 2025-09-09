@@ -7,50 +7,59 @@ from pynput import keyboard
 from pylablib.devices import PrincetonInstruments
 import gc
 import h5py
+from typing import Tuple
 
 # Global stop flag
 stop_loop = False
 
 # PATHS ########################################################################
 class Paths:
-    BASE_DIR = r"Z:\Attoline"
-#Empty statement to indicate this version also works with v2
+    # Server (authoritative) root. Sequence numbers determined here.
+    BASE_DIR = r"Z:\Attoline"  # server path
+    # Local mirror root (assumption). Adjust if needed.
+    LOCAL_BASE_DIR = r"C:\Users\ULP\Desktop\LocalData"  # assumption: change to preferred local drive
+# Empty statement to indicate this version also works with v2
 
 # DIRECTORY AND FILE MANAGEMENT ###############################################
-def create_hdf5_filepath():
-    """
-    Creates the directory structure: base_dir/YYYY/STRA_new/YYMMDD/
-    and returns the full path for a new HDF5 file: YYMMDD_XXX.hdf5.
-    Automatically increments XXX if the file already exists.
+def create_hdf5_filepath(base_dir: str) -> str:
+    """Create and reserve a new HDF5 filepath under base_dir.
+
+    Directory pattern: base_dir/YYYY/STRA_new/YYMMDD/YYMMDD_XXX/YYMMDD_XXX.hdf5
+    Sequence (XXX) determined by first location (server). Returns full filepath.
     """
     now = datetime.now()
     year = now.strftime("%Y")
     date_str = now.strftime("%y%m%d")
-    
-    # Create the base directory structure
-    year_dir = os.path.join(Paths.BASE_DIR, year)
+
+    year_dir = os.path.join(base_dir, year)
     stra_dir = os.path.join(year_dir, "STRA_new")
     date_dir = os.path.join(stra_dir, date_str)
     sequence_num = 1
-    # Find the next available sequence number
     while True:
         sequence_str = f"{date_str}_{sequence_num:03d}"
         sequence_dir = os.path.join(date_dir, sequence_str)
         hdf5_filename = f"{sequence_str}.hdf5"
         final_path = os.path.join(sequence_dir, hdf5_filename)
-
         if not os.path.exists(final_path):
-            # Ensure the directory for this sequence exists
             os.makedirs(sequence_dir, exist_ok=True)
             break
-
         sequence_num += 1
-
-        # Safety check to prevent infinite loop
         if sequence_num > 999:
             raise ValueError("Too many acquisitions for this date (>999)")
-
     return final_path
+
+
+def create_dual_filepaths() -> Tuple[str, str]:
+    """Create server path (authoritative sequence) then mirror path locally.
+
+    Returns (local_path, server_path).
+    """
+    server_path = create_hdf5_filepath(Paths.BASE_DIR)
+    # Derive relative path segment after server base dir
+    rel_path = os.path.relpath(server_path, Paths.BASE_DIR)
+    local_path = os.path.join(Paths.LOCAL_BASE_DIR, rel_path)
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+    return local_path, server_path
 
 def save_dict_to_hdf5_attrs(group, metadata_dict):
     """
@@ -81,11 +90,11 @@ def main():
     listener.start()
 
 
-    # Create directory structure and get HDF5 file path
-    hdf5_path = create_hdf5_filepath()
-    print(f"Data will be saved to: {hdf5_path}")
-    # Ensure parent directory exists before opening file
-    os.makedirs(os.path.dirname(hdf5_path), exist_ok=True)
+    # Create dual file paths (server decides sequence number)
+    local_hdf5_path, server_hdf5_path = create_dual_filepaths()
+    print(f"Local file:  {local_hdf5_path}")
+    print(f"Server file: {server_hdf5_path}")
+    os.makedirs(os.path.dirname(server_hdf5_path), exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     print(f"Timestamp: {timestamp}")
@@ -164,30 +173,46 @@ def main():
 
     # Use a try...finally block to ensure resources are closed properly
     try:
-        with h5py.File(hdf5_path, 'w') as f:
-            # Create a resizable dataset for the spectra and timestamps
-            dset = f.create_dataset(
-                "data",
-                shape=(0,),
-                maxshape=(Settings.NUMBER_OF_IMAGES,),
-                dtype=dtype,
-                chunks=(100,)  # Chunking is important for performance
+        # Open both files. Server file in SWMR writer mode.
+        with h5py.File(server_hdf5_path, 'w', libver='latest') as f_server, \
+             h5py.File(local_hdf5_path, 'w', libver='latest') as f_local:
+            # Create datasets
+            dset_server = f_server.create_dataset(
+                "data", shape=(0,), maxshape=(Settings.NUMBER_OF_IMAGES,), dtype=dtype, chunks=(100,)
             )
+            dset_local = f_local.create_dataset(
+                "data", shape=(0,), maxshape=(Settings.NUMBER_OF_IMAGES,), dtype=dtype, chunks=(100,)
+            )
+
+            # Metadata groups
+            meta_server = f_server.create_group("metadata")
+            meta_local = f_local.create_group("metadata")
+            save_dict_to_hdf5_attrs(meta_server, metadata)
+            save_dict_to_hdf5_attrs(meta_local, metadata)
+
+            # Enter SWMR on server side ONLY
+            f_server.flush()
+            f_server.swmr_mode = True
+            print("Server writer entered SWMR mode.")
+
+            # Flush local immediately (schedule at frame 0)
+            dset_local.flush(); f_local.flush()
+            print("Local initial flush (frame 0) complete.")
+
+            # Scheduling parameters
+            FLUSH_PERIOD = 1000
+            next_flush_server = 200
+            next_flush_local = next_flush_server + FLUSH_PERIOD  # first in-loop local flush frame (1-based)
             
-            # Create a group for metadata and save it as attributes
-            meta_group = f.create_group("metadata")
-            save_dict_to_hdf5_attrs(meta_group, metadata)
-            #f.swmr_mode = True
-            #print("Writer entered SWMR mode. Acquisition starting.")
-            # Start acquisition
+            server_flush_failures = []      # indices where server flush failed
+            server_write_failures = []      # indices where server write failed
+
             print("Starting acquisition... (Press 'Esc' to stop early)")
             cam.start_acquisition()
             t_prev = time.time()
-            
-            # Run main acquisition loop
+
             while i < Settings.NUMBER_OF_IMAGES:
                 data = cam.read_oldest_image()
-
                 if data is None:
                     time.sleep(Settings.EXP_TIME_MS / 1000 / 20)
                     continue
@@ -196,17 +221,47 @@ def main():
                 timestamp_us = int(t_now * 1e6)
                 max_val = data.max()
 
-                # Resize dataset and write new data
-                dset.resize((i + 1,))
-                dset[i] = (data.ravel().astype(np.uint16), timestamp_us)
+                # Resize and write both datasets
+                new_size = i + 1
+                dset_local.resize((new_size,))
+                row = (data.ravel().astype(np.uint16), timestamp_us)
+                dset_local[i] = row
                 
-                # Periodically flush data to disk
-                if i % 100 == 0:
-                    f.flush()
-                    print(f"Image {i} flushed.")
+                try:
+                    dset_server.resize((new_size,))
+                    dset_server[i] = row
+                except PermissionError as e:
+                    print(f"[Server write WARNING] frame {i}: {e}. Skipping server write for this frame.")
+                    server_write_failures.append(i)
 
+                # Interleaved flush logic (use 1-based frame index for comparison)
+                frame_index_1b = new_size  # 1-based
+
+                # Local flush schedule: 0,1000,2000,... (treat 0 as already flushed)
+                if frame_index_1b == next_flush_local and frame_index_1b != 0:
+                    try:
+                        dset_local.flush(); f_local.flush()
+                        print(f"[Local flush] frame {frame_index_1b}")
+                    except Exception as e:
+                        print(f"[Local flush ERROR] frame {frame_index_1b}: {e}")
+                    finally:
+                        next_flush_local += FLUSH_PERIOD * 2  # increment by 2*FLUSH_PERIOD
+
+                # Server flush schedule: 500,1500,2500,...
+                if frame_index_1b == next_flush_server:
+                    try:
+                        dset_server.flush(); f_server.flush()
+                        print(f"[Server SWMR flush] frame {frame_index_1b}")
+                        next_flush_server += FLUSH_PERIOD * 2
+                    except Exception as e:
+                        print(f"[Server flush ERROR] frame {frame_index_1b}: {e}. Will retry in {2*FLUSH_PERIOD} frames.")
+                        server_flush_failures.append(frame_index_1b)
+                        # Skip one cycle (add 1000) to retry later as requested
+                        next_flush_server += FLUSH_PERIOD * 2
+
+                # Lightweight periodic info (keep existing pattern logic)
                 dt = t_now - t_prev
-                if i % 40 == 0:
+                if (i + 50) % 100 == 0:
                     try:
                         print(rf"Image no {i} acquired in {dt:.4f} s, max value: {max_val}")
                     except Exception as e:
@@ -221,13 +276,27 @@ def main():
                 if stop_loop:
                     print("User interrupted acquisition with 'Esc'.")
                     break
-                
+
                 i += 1
-            
+
             # Final metadata update
-            meta_group.attrs["images_acquired"] = i
-            meta_group.attrs["violations"] = json.dumps(violations)
-            print("Final metadata saved.")
+            meta_server.attrs["images_acquired"] = i
+            meta_local.attrs["images_acquired"] = i
+            meta_server.attrs["violations"] = json.dumps(violations)
+            meta_local.attrs["violations"] = json.dumps(violations)
+            meta_server.attrs["server_flush_failures"] = json.dumps(server_flush_failures)
+            meta_server.attrs["server_write_failures"] = json.dumps(server_write_failures)
+
+            # Ensure final flushes (even if not on schedule)
+            try:
+                dset_local.flush(); f_local.flush()
+            except Exception:
+                pass
+            try:
+                dset_server.flush(); f_server.flush()
+            except Exception:
+                pass
+            print("Final metadata saved (both files).")
 
     finally:
         # Stop acquisition
@@ -274,7 +343,6 @@ def print_roi(cam) -> None:
     print(f"  Vertical end:       {roi[3]}")
     print(f"  Horizontal binning: {roi[4]}")
     print(f"  Vertical binning:   {roi[5]}")
-
 
 # PYNPUT CALLBACK #############################################################
 def on_press(key):
