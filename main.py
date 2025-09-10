@@ -112,7 +112,8 @@ def dual_writer_thread(
     initial_metadata: Dict[str, Any],
     server_write_failures: List[int],
     server_failed_rows: List[Any],
-    flush_interval: int = 50
+    flush_interval: int = 500,
+    repair_interval: int = 1000
 ):
     """Consume frames and write to BOTH local and server HDF5 files.
 
@@ -144,6 +145,9 @@ def dual_writer_thread(
                 print(f"[Writer][INITIAL FLUSH WARN] {e}")
 
             processed = 0
+            # Incremental repair bookkeeping
+            last_repair_index = 0  # start of next repair window
+            incremental_repaired = 0
             while True:
                 item = q.get()
                 if item is WRITER_DONE:
@@ -202,6 +206,30 @@ def dual_writer_thread(
                             else:
                                 try: server_failed_rows.remove(entry)
                                 except ValueError: pass
+                    # Incremental repair pass (bounded window) to fix silent missing frames early
+                    if (idx + 1) - last_repair_index >= repair_interval:
+                        start = last_repair_index
+                        end = idx + 1  # inclusive end -> slice exclusive
+                        try:
+                            ts_slice = dset_server['timestamp_us'][start:end]
+                            zero_rel = np.where(ts_slice == 0)[0]
+                            if zero_rel.size:
+                                for rel in zero_rel:
+                                    j = start + rel
+                                    try:
+                                        lrow = dset_local[j]
+                                        dset_server[j] = (lrow['spectrum'], int(lrow['timestamp_us']))
+                                        incremental_repaired += 1
+                                    except Exception as e:
+                                        print(f"[Writer][INCR REPAIR ERROR] frame {j}: {e}")
+                                try:
+                                    f_server.flush()
+                                except Exception:
+                                    pass
+                                print(f"[Writer][INCR REPAIR] window {start}:{end} repaired {len(zero_rel)} (total incremental {incremental_repaired})")
+                            last_repair_index = end
+                        except Exception as e:
+                            print(f"[Writer][INCR REPAIR SCAN ERROR] {e}")
             try:
                 f_local.flush(); f_server.flush()
             except Exception:
@@ -233,6 +261,7 @@ def dual_writer_thread(
                         except ValueError: pass
             meta_server.attrs['server_write_failures_initial'] = json.dumps(server_write_failures)
             meta_server.attrs['server_fail_buffer_remaining'] = len(server_failed_rows)
+            meta_server.attrs['incremental_repaired_frames'] = incremental_repaired
     except Exception as e:
         print(f"[Writer][CRITICAL] {e}")
     print("[Writer] Dual-writer thread finished")
@@ -297,7 +326,7 @@ def main():
     server_failed_rows: list[tuple[int, np.ndarray, int]] = []
     writer = threading.Thread(
         target=dual_writer_thread,
-        args=(data_queue, local_hdf5_path, server_hdf5_path, Settings.NUMBER_OF_IMAGES, dtype, metadata, server_write_failures, server_failed_rows, 50),
+        args=(data_queue, local_hdf5_path, server_hdf5_path, Settings.NUMBER_OF_IMAGES, dtype, metadata, server_write_failures, server_failed_rows, 500),
         daemon=True
     )
     writer.start()
