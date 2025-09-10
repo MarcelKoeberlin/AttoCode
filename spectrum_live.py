@@ -7,7 +7,7 @@ Live display and simple control for a Princeton Instruments camera.
 - Computes a normalized std-dev gauge over a selectable ROI using the last 2 seconds
     of averaged spectra.
 - "Keep" button stores the averaged spectrum as a reference line.
-- "Save" button writes the kept spectrum to a compressed .npz file organized by date.
+- "Save" button writes the kept spectrum to an HDF5 file organized by date.
 
 """
 
@@ -17,6 +17,7 @@ import datetime
 from collections import deque
 
 import numpy as np
+import h5py
 import matplotlib
 # Choose a backend suitable for interactive animations.
 matplotlib.use('QtAgg')
@@ -52,8 +53,8 @@ def main():
         os.system('cls')
 
         # Local save directory (user-customizable). The code uses a fixed path for testing.
-        base_dir = os.path.join(os.path.expanduser("~"), "XUV_data")
-        base_dir = r'Z:\Attoline\TEST'  # Intentionally overriding for target environment.
+        #base_dir = os.path.join(os.path.expanduser("~"), "XUV_new")
+        base_dir = r'Z:\Attoline'  # Intentionally overriding for target environment.
 
         # Load energy axis (x-axis) from file and validate its length.
         try:
@@ -73,8 +74,8 @@ def main():
         # Buffer storing tuples (timestamp, averaged_spectrum) covering the last ~2 seconds.
         spectrum_buffer_2s = deque()
 
-        # Rolling raw buffer used to compute the displayed rolling average (last 5 raw acquisitions).
-        rolling_raw_buffer = deque(maxlen=5)
+        # Rolling raw buffer used to compute the displayed rolling average (last 2 raw acquisitions).
+        rolling_raw_buffer = deque(maxlen=2)
 
         # Connect to the Princeton Instruments camera.
         try:
@@ -129,7 +130,6 @@ def main():
         # Small status text on the max trace axes for save feedback
         save_status_text = ax_max_trace.text(0.75, 1.4, '', ha='center', va='bottom',
                                                                                 fontsize=10, color='#33A02C', transform=ax_max_trace.transAxes)
-
         # -------------------- Axes styling -----------------------------------------
         # Spectrum axis
         ax_spec.set_title("Use up/down arrow keys to adjust Y-axis", loc='left')
@@ -154,7 +154,7 @@ def main():
         ax_max_trace.tick_params(left=False, labelleft=False)
 
         # Std-dev gauge axis — show percent on right y-axis
-        ax_std_gauge.set_title("Avg. Norm. Std\n(2s window over 5 acquisitions)", fontsize=12)
+        ax_std_gauge.set_title("Avg. Norm. Std\n(2s window over 2 acquisitions)", fontsize=12)
         ax_std_gauge.set_ylim(0, 5)  # percent scale (0-5%)
         ax_std_gauge.set_xlim(-0.5, 0.5)
         ax_std_gauge.set_xticks([])
@@ -205,7 +205,7 @@ def main():
                 print("Kept the average of the last 2 seconds.")
 
         def on_save_clicked(event):
-                """Save the currently 'kept' spectrum to a compressed .npz file with date-based folders."""
+                """Save the currently 'kept' spectrum to an HDF5 file with date-based folders."""
                 if not ref_line.get_visible():
                         save_status_text.set_text("No 'kept' spectrum to save. Click 'Keep' first.")
                         fig.canvas.draw_idle()
@@ -217,20 +217,26 @@ def main():
                 year_str = now.strftime("%Y")
                 date_str_long = now.strftime("%y%m%d")
 
-                save_dir = os.path.join(base_dir, year_str, "XUV", date_str_long)
+                save_dir = os.path.join(base_dir, year_str, "XUV_new", date_str_long)
                 os.makedirs(save_dir, exist_ok=True)
 
                 # Find next available index for the day's files.
                 file_index = 1
                 while True:
-                        filename = f"XUV_{date_str_long}_{file_index:04d}.npz"
+                        filename = f"XUV_{date_str_long}_{file_index:04d}.hdf5"
                         filepath = os.path.join(save_dir, filename)
                         if not os.path.exists(filepath):
                                 break
                         file_index += 1
 
                 try:
-                        np.savez_compressed(filepath, energy_eV=energy_eV, counts=kept_spectrum)
+                        with h5py.File(filepath, 'w') as f:
+                                f.create_dataset('energy', data=energy_eV)
+                                f.create_dataset('spectrum', data=kept_spectrum)
+                                # Add some metadata
+                                f.attrs['creation_time'] = now.isoformat()
+                                f.attrs['description'] = 'Kept spectrum from live XUV acquisition'
+                        
                         status_msg = f"Saved to: {filepath}"
                         print(status_msg)
                         save_status_text.set_text(status_msg)
