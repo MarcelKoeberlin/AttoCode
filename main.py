@@ -8,10 +8,17 @@ from pylablib.devices import PrincetonInstruments
 import gc
 import h5py
 from typing import Tuple
+import threading
+from collections import deque
+import subprocess
+import sys
+import tempfile
+import atexit
 
 # Global stop flag
 stop_loop = False
-
+# Clear terminal on Windows
+os.system('cls')
 # PATHS ########################################################################
 class Paths:
     # Server (authoritative) root. Sequence numbers determined here.
@@ -74,21 +81,178 @@ def save_dict_to_hdf5_attrs(group, metadata_dict):
 
 # SETTINGS #####################################################################
 class Settings:
-    EXP_TIME_MS = 20
+    EXP_TIME_MS = 10
     BINNING = (1, 400)
     SPECTRA_SHAPE = (1, 1340)
     NUMBER_OF_IMAGES = int(300e3)
-    ACQUISITION_TIME_VIOLATION_THRESHOLD_MS = EXP_TIME_MS * 1.8
+    ACQUISITION_TIME_VIOLATION_THRESHOLD_MS = 40
+
+
+def ask_exp_time_ms(default_ms: float):
+    """Open a small modal Tkinter dialog to ask the user for exposure time in ms.
+
+    Returns the numeric value (float) entered by the user or the default on cancel/error.
+    This function imports tkinter locally so it won't fail in headless or minimal environments
+    until it's actually called.
+    """
+    try:
+        import tkinter as tk
+    except Exception:
+        print("tkinter not available; using default exposure time.")
+        return default_ms
+
+    result = {"value": default_ms}
+
+    def on_ok():
+        try:
+            v = float(entry_var.get())
+            result["value"] = v
+        except Exception:
+            # ignore parse errors and keep default
+            pass
+        root.destroy()
+
+    def on_cancel():
+        root.destroy()
+
+    root = tk.Tk()
+    root.title("Set Exposure Time (ms)")
+    # Small fixed size dialog
+    root.geometry("320x120")
+    root.resizable(False, False)
+
+    tk.Label(root, text="Exposure time (ms):").pack(pady=(12, 2))
+    entry_var = tk.StringVar(value=str(default_ms))
+    entry = tk.Entry(root, textvariable=entry_var)
+    entry.pack(pady=4)
+
+    btn_frame = tk.Frame(root)
+    btn_frame.pack(pady=8)
+    tk.Button(btn_frame, text="OK", width=10, command=on_ok).pack(side="left", padx=6)
+    tk.Button(btn_frame, text="Cancel", width=10, command=on_cancel).pack(side="left", padx=6)
+
+    entry.focus_set()
+    # Keep on top so the user sees it before other windows
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    try:
+        root.mainloop()
+    except Exception:
+        # If the GUI loop fails for some reason, return default
+        return default_ms
+
+    return result["value"]
 
 
 # MAIN FUNCTION ################################################################
 def main():
     global stop_loop
 
+    # Clear console immediately on startup so the terminal window starts fresh
+    os.system('cls')
+
     # Start the keyboard listener
     listener = keyboard.Listener(on_press=on_press)
     listener.start()
 
+    # Prepare paths for IPC buffer and log used by the GUI
+    workspace_dir = os.path.dirname(os.path.abspath(__file__))
+    buf_file = os.path.join(workspace_dir, 'atto_recent.npy')
+    log_file = os.path.join(workspace_dir, 'atto_last_lines.log')
+    stop_file = os.path.join(workspace_dir, 'atto_stop.flag')
+    stopped_file = os.path.join(workspace_dir, 'atto_stopped.flag')
+
+    # Simple rotating logger capture: we will maintain last 200 printed lines in memory
+    printed_lines = deque(maxlen=200)
+
+    # Wrapper to capture prints while still printing to real stdout
+    class Tee:
+        def write(self, s):
+            try:
+                for line in s.splitlines():
+                    if line.strip() == '':
+                        continue
+                    printed_lines.append(line)
+                sys.__stdout__.write(s)
+            except Exception:
+                pass
+
+        def flush(self):
+            try:
+                sys.__stdout__.flush()
+            except Exception:
+                pass
+
+    sys.stdout = Tee()
+    sys.stderr = Tee()
+
+    # Ensure log file is cleaned and will be written periodically
+    def write_log_file():
+        try:
+            with open(log_file, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(list(printed_lines)[-20:]))
+        except Exception:
+            pass
+
+    atexit.register(write_log_file)
+
+    # Launch GUI subprocess (non-blocking). If it fails, continue without GUI.
+    # Ensure previous GUI files don't show stale data
+    try:
+        # truncate log file so GUI starts with empty terminal
+        with open(log_file, 'w', encoding='utf-8'):
+            pass
+    except Exception:
+        pass
+
+    try:
+        # remove stale buffer file so GUI doesn't read previous spectrum
+        if os.path.exists(buf_file):
+            try:
+                os.remove(buf_file)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # remove any leftover stop/stopped files so GUI starts fresh
+    try:
+        if os.path.exists(stop_file):
+            try:
+                os.remove(stop_file)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        if os.path.exists(stopped_file):
+            try:
+                os.remove(stopped_file)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    
+    # Before starting the full GUI, ask the user for exposure time (ms).
+    try:
+        chosen = ask_exp_time_ms(Settings.EXP_TIME_MS)
+        # coerce to numeric and update Settings
+        try:
+            Settings.EXP_TIME_MS = float(chosen)
+        except Exception:
+            pass
+        print(f"Exposure time set to {Settings.EXP_TIME_MS} ms")
+    except Exception:
+        print("Exposure dialog failed or was cancelled; using default.")
+
+    try:
+        gui_proc = subprocess.Popen([sys.executable, os.path.join(workspace_dir, 'atto_gui.py')])
+    except Exception as e:
+        print(f"Could not launch GUI subprocess: {e}")
+        gui_proc = None
 
     # Create dual file paths (server decides sequence number)
     local_hdf5_path, server_hdf5_path = create_dual_filepaths()
@@ -200,19 +364,33 @@ def main():
             print("Local initial flush (frame 0) complete.")
 
             # Scheduling parameters
-            FLUSH_PERIOD = 1000
-            next_flush_server = 200
+            FLUSH_PERIOD = 2000
+            next_flush_server = 100
             next_flush_local = next_flush_server + FLUSH_PERIOD  # first in-loop local flush frame (1-based)
             
             server_flush_failures = []      # indices where server flush failed
             server_write_failures = []      # indices where server write failed
+            # store tuples of (index, spectrum_array, timestamp_us) for later retry
+            server_fail = []
 
             print("Starting acquisition... (Press 'Esc' to stop early)")
             cam.start_acquisition()
             t_prev = time.time()
 
             while i < Settings.NUMBER_OF_IMAGES:
-                data = cam.read_oldest_image()
+                # Check for external stop request (from GUI Stop button)
+                try:
+                    if os.path.exists(stop_file):
+                        print("Stop flag detected from GUI. Stopping acquisition...")
+                        try:
+                            os.remove(stop_file)
+                        except Exception:
+                            pass
+                        stop_loop = True
+                except Exception:
+                    pass
+
+                data = cam.read_newest_image()
                 if data is None:
                     time.sleep(Settings.EXP_TIME_MS / 1000 / 20)
                     continue
@@ -233,6 +411,11 @@ def main():
                 except PermissionError as e:
                     print(f"[Server write WARNING] frame {i}: {e}. Skipping server write for this frame.")
                     server_write_failures.append(i)
+                    try:
+                        # save the row (index, spectrum, timestamp) for retrying later
+                        server_fail.append((i, data.ravel().astype(np.uint16).copy(), timestamp_us))
+                    except Exception:
+                        pass
 
                 # Interleaved flush logic (use 1-based frame index for comparison)
                 frame_index_1b = new_size  # 1-based
@@ -259,6 +442,45 @@ def main():
                         # Skip one cycle (add 1000) to retry later as requested
                         next_flush_server += FLUSH_PERIOD * 2
 
+                    # After a server flush attempt (whether success or failure), try to replay any stored failed writes
+                    if len(server_fail) > 0:
+                        try:
+                            # iterate over a copy since we'll modify the list
+                            for entry in list(server_fail):
+                                idx, spec_arr, ts = entry
+                                # ensure server dataset is large enough
+                                if dset_server.shape[0] <= idx:
+                                    try:
+                                        dset_server.resize((idx + 1,))
+                                    except Exception as e:
+                                        print(f"[Server retry WARNING] cannot resize for idx {idx}: {e}")
+                                        continue
+                                # read existing timestamp on server; if it's zero, overwrite
+                                try:
+                                    existing_ts = int(dset_server[idx]["timestamp_us"])
+                                except Exception:
+                                    existing_ts = 0
+                                if existing_ts == 0:
+                                    try:
+                                        dset_server[idx] = (spec_arr, ts)
+                                        print(f"[Server retry] wrote frame {idx} from server_fail")
+                                        try:
+                                            server_fail.remove(entry)
+                                            if idx in server_write_failures:
+                                                server_write_failures.remove(idx)
+                                        except ValueError:
+                                            pass
+                                    except Exception as e:
+                                        print(f"[Server retry ERROR] frame {idx}: {e}")
+                                else:
+                                    # server already has data for this index; drop the stored retry
+                                    try:
+                                        server_fail.remove(entry)
+                                    except ValueError:
+                                        pass
+                        except Exception as e:
+                            print(f"[Server retry ERROR] overall: {e}")
+
                 # Lightweight periodic info (keep existing pattern logic)
                 dt = t_now - t_prev
                 if (i + 50) % 100 == 0:
@@ -279,6 +501,33 @@ def main():
 
                 i += 1
 
+                # --- Maintain recent buffer file for GUI: append latest raw spectrum ---
+                try:
+                    # read existing buffer if present
+                    if os.path.exists(buf_file):
+                        try:
+                            recent = np.load(buf_file)
+                            if recent.ndim == 2:
+                                recent = np.vstack([recent, data.ravel().astype(np.uint16)])
+                            else:
+                                recent = np.atleast_2d(data.ravel().astype(np.uint16))
+                        except Exception:
+                            recent = np.atleast_2d(data.ravel().astype(np.uint16))
+                    else:
+                        recent = np.atleast_2d(data.ravel().astype(np.uint16))
+
+                    # keep only last 100 raw frames to bound file size
+                    if recent.shape[0] > 100:
+                        recent = recent[-100:]
+
+                    np.save(buf_file, recent)
+                except Exception as e:
+                    print(f"Could not update GUI buffer file: {e}")
+
+                # Update rotating log file periodically
+                if i % 5 == 0:
+                    write_log_file()
+
             # Final metadata update
             meta_server.attrs["images_acquired"] = i
             meta_local.attrs["images_acquired"] = i
@@ -292,6 +541,62 @@ def main():
                 dset_local.flush(); f_local.flush()
             except Exception:
                 pass
+            # Final attempt: replay any remaining server_fail entries into the server dataset
+            if len(server_fail) > 0:
+                try:
+                    for entry in list(server_fail):
+                        idx, spec_arr, ts = entry
+                        if dset_server.shape[0] <= idx:
+                            try:
+                                dset_server.resize((idx + 1,))
+                            except Exception as e:
+                                print(f"[Final Server retry WARNING] cannot resize for idx {idx}: {e}")
+                                continue
+                        try:
+                            existing_ts = int(dset_server[idx]["timestamp_us"])
+                        except Exception:
+                            existing_ts = 0
+                        if existing_ts == 0:
+                            try:
+                                dset_server[idx] = (spec_arr, ts)
+                                print(f"[Final Server retry] wrote frame {idx} from server_fail")
+                                try:
+                                    server_fail.remove(entry)
+                                    if idx in server_write_failures:
+                                        server_write_failures.remove(idx)
+                                except ValueError:
+                                    pass
+                            except Exception as e:
+                                print(f"[Final Server retry ERROR] frame {idx}: {e}")
+                        else:
+                            try:
+                                server_fail.remove(entry)
+                            except ValueError:
+                                pass
+                except Exception as e:
+                    print(f"[Final Server retry ERROR] overall: {e}")
+            # Additional repair: for all acquired indices, if server entry is zeroed (timestamp==0 or spectrum all zeros),
+            # copy the corresponding row from the local file at the same index.
+            try:
+                max_check = min(i, dset_server.shape[0], dset_local.shape[0])
+                for idx in range(max_check):
+                    try:
+                        s_ts = int(dset_server[idx]["timestamp_us"])
+                        s_spec = dset_server[idx]["spectrum"]
+                        # treat as zero if timestamp is 0 or spectrum all zeros
+                        if s_ts == 0 or np.all(s_spec == 0):
+                            try:
+                                local_row = dset_local[idx]
+                                l_spec = local_row["spectrum"]
+                                l_ts = int(local_row["timestamp_us"])
+                                dset_server[idx] = (l_spec, l_ts)
+                                print(f"[Server repair] replaced zeroed frame {idx} from local file")
+                            except Exception as e:
+                                print(f"[Server repair ERROR] cannot copy frame {idx} from local: {e}")
+                    except Exception as e:
+                        print(f"[Server repair ERROR] reading server idx {idx}: {e}")
+            except Exception as e:
+                print(f"[Server repair ERROR] overall scan failed: {e}")
             try:
                 dset_server.flush(); f_server.flush()
             except Exception:
@@ -331,6 +636,12 @@ def main():
 
         print(f"Acquisition complete. Images acquired: {i}, Number of Violations: {len(violations)}")
         print(rf"Violations at: {violations}")
+        # signal GUI that acquisition and save finished
+        try:
+            with open(stopped_file, 'w', encoding='utf-8') as f:
+                f.write('stopped')
+        except Exception:
+            pass
 
 
 # PRINT ROI HELPER ############################################################
