@@ -30,7 +30,7 @@ class Settings:
     
     # --- Data Processing ---
     # Number of raw acquisitions to average for the live display.
-    ROLLING_AVG_WINDOW = 20
+    ROLLING_AVG_WINDOW = 3
     # Number of seconds of averaged spectra to buffer for the std-dev calculation.
     STD_DEV_BUFFER_SECONDS = 1
 
@@ -104,7 +104,7 @@ class SpectrumLiveApp:
         # Secondary axis for transmittance
         self.ax_spec_right = self.ax_spec.twinx()
         self.ax_spec_right.set_ylabel("Transmittance")
-        self.ax_spec_right.set_ylim(0, 1.05)
+        self.ax_spec_right.set_ylim(0, 1)
         self.ax_spec_right.grid(False)
 
         # Plot artists
@@ -112,7 +112,7 @@ class SpectrumLiveApp:
         self.line, = self.ax_spec.plot(self.energy_eV, zeros, color='#0072BD', label="Live Spectrum")
         self.ref_line, = self.ax_spec.plot(self.energy_eV, zeros, color='#D95319', linestyle='--', label="Kept Spectrum")
         self.ref_line_ref, = self.ax_spec.plot(self.energy_eV, zeros, color='#2CA02C', linestyle='--', label="Ref Spectrum")
-        self.trans_line, = self.ax_spec_right.plot(self.energy_eV, zeros, color='#0000FF', label="Transmittance")
+        self.trans_line, = self.ax_spec_right.plot(self.energy_eV, zeros, color="#757575FF", label="Transmittance", linewidth=1)
         self.max_line, = self.ax_max_trace.plot(list(self.max_vals_buffer), color='#A2142F')
         self.std_dev_bar_patch = self.ax_std_gauge.bar(0, 0, color='#33A02C', width=1.0)[0]
         self.save_status_text = self.ax_max_trace.text(0.75, 1.4, '', ha='center', transform=self.ax_max_trace.transAxes, color='green')
@@ -128,11 +128,14 @@ class SpectrumLiveApp:
         xmin, xmax = 20, 75
         self.ax_spec.set_xlim(xmin, xmax)
         initial_ylim = np.max(self.cam.read_newest_image().ravel().astype(np.uint16)) * 2
-        self.ax_spec.set_ylim(0, max(10000, initial_ylim))
-        self.ax_spec.hlines(y=65535, xmin=xmin, xmax=xmax, colors='#7E2F8E', linestyles='--', label="Saturation (16-bit)")
+        # Ensure saturation level is within visible range at start
+        upper = max(10000, initial_ylim, 65535 * 1.05)
+        self.ax_spec.set_ylim(0, upper)
+        # Saturation line (store handle for legend and possible future dynamic behavior)
+        self.sat_line = self.ax_spec.axhline(y=65535, color='#7E2F8E', linestyle='--', label="Saturation (16-bit)")
 
-        # Create initial legend (store handle for blitting). Start with only visible lines.
-        self.legend = self.ax_spec.legend([self.line], ["Live Spectrum"])  # stored for blitting
+        # Create initial legend including static saturation line
+        self.legend = self.ax_spec.legend([self.line, self.sat_line], ["Live Spectrum", "Saturation (16-bit)"])  # stored for blitting
 
         self.ax_max_trace.set_title(f"Max (Rolling Avg over {Settings.ROLLING_AVG_WINDOW} frames)")
         self.ax_max_trace.set_xticks([])
@@ -163,6 +166,11 @@ class SpectrumLiveApp:
         if not visible_handles:
             visible_handles = [self.line]
             visible_labels = ["Live Spectrum"]
+        # Always include saturation line (static reference) exactly once if visible
+        if hasattr(self, 'sat_line') and self.sat_line.get_visible():
+            if self.sat_line not in visible_handles:
+                visible_handles.append(self.sat_line)
+                visible_labels.append("Saturation (16-bit)")
         # Remove old legend if exists
         if hasattr(self, 'legend') and self.legend is not None:
             try:
@@ -211,7 +219,11 @@ class SpectrumLiveApp:
         else:
             self.animation.event_source.start()
             return
-        self.ax_spec.set_ylim(0, max(1000, new_max))
+        
+        # Allow any Y limit, but ensure minimum of 1000 for usability
+        final_max = max(new_max, 1000)
+        
+        self.ax_spec.set_ylim(0, final_max)
         self.fig.canvas.draw_idle()
         self.animation.event_source.start()
 
@@ -295,19 +307,20 @@ class SpectrumLiveApp:
         data = self.cam.read_newest_image()
         if data is None:
             return (self.line, self.max_line, self.ref_line, self.ref_line_ref,
-                    self.trans_line, self.std_dev_bar_patch, self.save_status_text, self.legend)
+                    self.trans_line, self.std_dev_bar_patch, self.save_status_text, self.legend, self.sat_line)
         raw_spectrum = data.ravel().astype(np.uint16)
         if raw_spectrum.shape[0] != self.energy_eV.shape[0]:
             print(f"Warning: Unexpected spectrum shape: {raw_spectrum.shape}")
             return (self.line, self.max_line, self.ref_line, self.ref_line_ref,
-                    self.trans_line, self.std_dev_bar_patch, self.save_status_text, self.legend)
+                    self.trans_line, self.std_dev_bar_patch, self.save_status_text, self.legend, self.sat_line)
 
         self.rolling_raw_buffer.append(raw_spectrum)
         avg_spectrum = np.mean(self.rolling_raw_buffer, axis=0)
         self.line.set_ydata(avg_spectrum)
 
         if self.kept_ref_spectrum_data is not None and self.kept_ref_spectrum_data.shape == avg_spectrum.shape:
-            trans = np.divide(avg_spectrum, self.kept_ref_spectrum_data, out=np.zeros_like(avg_spectrum, dtype=float), where=self.kept_ref_spectrum_data != 0)
+            background = np.min(self.kept_ref_spectrum_data) # The camera returns something for 90 eV and up, but its just background.
+            trans = np.divide(avg_spectrum - background, self.kept_ref_spectrum_data - background, out=np.zeros_like(avg_spectrum, dtype=float), where=self.kept_ref_spectrum_data != 0)
             np.clip(trans, 0, 1, out=trans)
             self.trans_line.set_ydata(trans)
 
@@ -328,7 +341,7 @@ class SpectrumLiveApp:
                 avg_norm_std_percent = np.mean(norm_std[self.roi_indices]) * 100
                 self.std_dev_bar_patch.set_height(avg_norm_std_percent)
         return (self.line, self.max_line, self.ref_line, self.ref_line_ref,
-                self.trans_line, self.std_dev_bar_patch, self.save_status_text, self.legend)
+                self.trans_line, self.std_dev_bar_patch, self.save_status_text, self.legend, self.sat_line)
 
     # --------------- Run / Close -------------
     def run(self):
